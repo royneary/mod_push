@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push_ubuntu.erl
-%%% Author  : Christian Ulrich <christian@chatninja.org>
+%%% Author  : Christian Ulrich <christian@rechenwerk.net>
 %%% Purpose : Send push notifications to the Ubuntu Push service
 %%% Created : 07 Feb 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
