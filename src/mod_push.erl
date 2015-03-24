@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push.erl
-%%% Author  : Christian Ulrich <christian@chatninja.org>
+%%% Author  : Christian Ulrich <christian@rechenwerk.net>
 %%% Purpose : Send push notifications to client when stanza is stored
 %%%           for later delivery
 %%%           
