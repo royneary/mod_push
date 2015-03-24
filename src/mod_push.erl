@@ -1300,8 +1300,8 @@ start(Host, Opts) ->
                        50),
     ejabberd_hooks:add(mgmt_resend_stanzas_hook, Host, ?MODULE,
                        on_resend_stanzas, 50),
-    %ejabberd_hooks:add(mgmt_wait_for_resume_hook, Host, ?MODULE,
-    %                   adjust_resume_timout, 50),
+    ejabberd_hooks:add(mgmt_wait_for_resume_hook, Host, ?MODULE,
+                       adjust_resume_timout, 50),
     ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
                        on_disco_sm_features, 50),
     % FIXME: disco_sm_info is not implemented in mod_disco!
@@ -1337,8 +1337,6 @@ add_backends(Host, Opts) ->
                 fun({B, _}) ->
                     RegisterHost =B#push_backend.register_host,
                     PubsubHost = B#push_backend.pubsub_host,
-                    ejabberd_router:register_route(RegisterHost),
-                    ejabberd_router:register_route(PubsubHost),
                     ejabberd_hooks:add(adhoc_local_commands,
                                        RegisterHost,
                                        ?MODULE,
@@ -1397,6 +1395,8 @@ add_disco_hooks() ->
                           pubsub_host = PubsubHost}] =
             mnesia:read({push_backend, K}),
             mod_disco:register_feature(PubsubHost, ?NS_PUSH),
+            ejabberd_router:register_route(RegHost),
+            ejabberd_router:register_route(PubsubHost),
             ejabberd_hooks:add(disco_local_identity, PubsubHost, ?MODULE,
                                on_disco_pubsub_identity, 50),
             ejabberd_hooks:add(disco_local_identity, RegHost, ?MODULE,
@@ -1644,7 +1644,7 @@ on_disco_pubsub_identity(Acc, _From, _To, _, _Lang) ->
 %%-------------------------------------------------------------------------
 
 on_disco_reg_identity(Acc, _From, To, <<"">>, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_reg_identity", []),
+    ?DEBUG("######## on_disco_reg_identity", []),
     RegHost = jlib:jid_to_string(To),
     F = fun() ->
         MatchHead =
@@ -1667,8 +1667,8 @@ on_disco_reg_identity(Acc, _From, To, <<"">>, _Lang) ->
                            children = []}
                 end,
                 AppNames),
-            ?DEBUG("returning ~p", [Identities|Acc]),
-            [Identities|Acc];
+            ?DEBUG("returning ~p", [Identities ++ Acc]),
+            Identities ++ Acc;
 
         _ ->
             ?DEBUG("returning ~p", [Acc]),
