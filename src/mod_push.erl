@@ -77,7 +77,8 @@
          incoming_notification/2,
          on_resend_stanzas/1,
          on_disco_sm_features/5,
-         on_disco_pubsub_identity/5,
+         on_disco_pubsub_info/5,
+         %on_disco_pubsub_identity/5,
          on_disco_reg_identity/5,
          process_adhoc_command/4,
          adjust_resume_timeout/2,
@@ -572,6 +573,9 @@ register_client(#jid{luser = LUser,
                     [] ->
                         Secret = randoms:get_string(),
                         NewNode = randoms:get_string(), 
+                        % FIXME: let create_node return NodeIdx is a workaround,
+                        % instead there should be an exported function
+                        % mod_pubsub:set_affiliation
                         {result, NodeIdx} =
                         mod_pubsub:create_node(RegisterHost, PubsubHost,
                                                NewNode, PubsubHost, <<"push">>),
@@ -1239,9 +1243,9 @@ incoming_notification(_NodeId, _Payload) ->
 
 %-------------------------------------------------------------------------
 
-adjust_resume_timeout(Timeout, User) ->
+adjust_resume_timeout(Timeout, #jid{luser = LUser, lserver = LServer}) ->
     F = fun() ->
-        case mnesia:read({push_client, jlib:jid_tolower(User)}) of
+        case mnesia:read({push_user, {LUser, LServer}}) of
             [] -> Timeout;
             _ -> ?ADJUSTED_RESUME_TIMEOUT
         end
@@ -1293,7 +1297,6 @@ start(Host, Opts) ->
     % TODO: send push notifications (event server available) to all push users
 
     %%% FIXME: haven't thought about IQDisc parameter
-    %%% FIXME: will only iqs by local users be handled?
     gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_PUSH, ?MODULE,
                                   process_iq, one_queue),
     ejabberd_hooks:add(mgmt_queue_add_hook, Host, ?MODULE, on_store_stanza,
@@ -1308,7 +1311,7 @@ start(Host, Opts) ->
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
         add_backends(Host, Opts),
-        add_disco_hooks()
+        add_disco_hooks(Host)
     end,
     case mnesia:transaction(F) of
         {atomic, _} -> ?DEBUG("++++++++ Added push backends", []);
@@ -1385,24 +1388,41 @@ add_backends(Host, Opts) ->
 
 %-------------------------------------------------------------------------
 
--spec(add_disco_hooks/0 :: () -> ok). 
+-spec(add_disco_hooks/1 ::
+(
+    ServerHost :: binary())
+    -> ok
+). 
 
-add_disco_hooks() ->
+add_disco_hooks(ServerHost) ->
     BackendKeys = mnesia:all_keys(push_backend),
     lists:foreach(
         fun(K) ->
             [#push_backend{register_host = RegHost,
-                          pubsub_host = PubsubHost}] =
+                           pubsub_host = PubsubHost}] =
             mnesia:read({push_backend, K}),
-            mod_disco:register_feature(PubsubHost, ?NS_PUSH),
-            ejabberd_router:register_route(RegHost),
-            ejabberd_router:register_route(PubsubHost),
-            ejabberd_hooks:add(disco_local_identity, PubsubHost, ?MODULE,
-                               on_disco_pubsub_identity, 50),
+            ?DEBUG("Found push backend, register_host = ~p, pubsub_host = ~p",
+                   [RegHost, PubsubHost]),
+            register_new_route(RegHost),
+            %ejabberd_hooks:add(disco_local_identity, PubsubHost, ?MODULE,
+            %                   on_disco_pubsub_identity, 50),
+            % FIXME: this is a workaround, see below
+            ejabberd_hooks:add(disco_info, ServerHost, ?MODULE,
+                               on_disco_pubsub_info, 101),
             ejabberd_hooks:add(disco_local_identity, RegHost, ?MODULE,
                                on_disco_reg_identity, 50)
         end,
         BackendKeys).
+
+%-------------------------------------------------------------------------
+
+register_new_route(HostName) ->
+    case lists:member(HostName, ejabberd_router:dirty_get_all_domains()) of
+        false ->
+            ?DEBUG("Registering new route: ~p", [HostName]),
+            ejabberd_router:register_route(HostName);
+        true -> ok
+    end.
 
 %-------------------------------------------------------------------------
 
@@ -1430,8 +1450,8 @@ stop(Host) ->
                           on_store_stanza, 49),
     ejabberd_hooks:delete(mgmt_resend_stanzas_hook, Host, ?MODULE,
                           on_resend_stanzas, 50),
-    %ejabberd_hooks:delete(mgmt_wait_for_resume_hook, Host, ?MODULE,
-    %                      adjust_resume_timout, 50),
+    ejabberd_hooks:delete(mgmt_wait_for_resume_hook, Host, ?MODULE,
+                          adjust_resume_timout, 50),
     F = fun() ->
         lists:foreach(fun(Id) ->
             [Backend] = mnesia:read({push_backend, Id}),
@@ -1441,9 +1461,8 @@ stop(Host) ->
             ejabberd_router:unregister_route(PubsubHost),
             ejabberd_hooks:delete(disco_local_identity, RegisterHost, ?MODULE,
                                   on_disco_reg_identity, 50),
-            ejabberd_hooks:delete(disco_local_identity, PubsubHost, ?MODULE,
-                                  on_disco_pubsub_identity, 50),
-            mod_disco:unregister_feature(PubsubHost, ?NS_PUSH)
+            ejabberd_hooks:delete(disco_info, Host, ?MODULE,
+                                  on_disco_pubsub_info, 50)
         end,
         mnesia:all_keys(push_backend))
     end,
@@ -1616,36 +1635,69 @@ process_iq(From, _To, #iq{type = Type, sub_el = SubEl} = IQ) ->
 %-------------------------------------------------------------------------
 
 on_disco_sm_features(empty, _From, _To, <<"">>, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_sm_features", []),
+    ?DEBUG("+++++++++ on_disco_sm_features, returning ~p",
+           [{result, [?NS_PUSH]}]),
     {result, [?NS_PUSH]};
 
 on_disco_sm_features({result, Features}, _From, _To, <<"">>, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_sm_features", []),
+    ?DEBUG("+++++++++ on_disco_sm_features, returning ~p",
+           [{result, [?NS_PUSH|Features]}]),
     {result, [?NS_PUSH|Features]};
 
 on_disco_sm_features(Acc, _From, _To, _, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_sm_features", []),
+    ?DEBUG("+++++++++ on_disco_sm_features, returning ~p", [Acc]),
     Acc.
 
 %%-------------------------------------------------------------------------
 
-on_disco_pubsub_identity(Acc, _From, _To, <<"">>, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_pubsub_identity", []),
-    PubsubIdentity =
-    #xmlel{name = <<"identity">>,
-           attrs = [{<<"category">>, <<"pubsub">>}, {<<"type">>, <<"push">>}],
-           children = []},
-    [PubsubIdentity|Acc];
+% FIXME: this is a workaround, it adds identity and features to the info data
+% created by mod_disco when mod_pubsub calls the hook disco_info. Instead
+% mod_pubsub should set mod_disco:process_local_iq_info as iq handler for its
+% pubsub host. Then on_disco_identity can hook up with disco_local_identity and
+% disco_local_features
+on_disco_pubsub_info(Acc, _ServerHost, mod_pubsub, <<"">>, <<"">>) ->
+    PushIdentity = #xmlel{name = <<"identity">>,
+                          attrs = [{<<"category">>, <<"pubsub">>},
+                                   {<<"type">>, <<"push">>}],
+                          children = []},
+    PushFeature = #xmlel{name = <<"feature">>,
+                         attrs = [{<<"var">>, ?NS_PUSH}],
+                         children = []},
+    ?DEBUG("on_disco_pubsub_info, returning ~p", [[PushIdentity, PushFeature | Acc]]),
+    [PushIdentity, PushFeature | Acc];
 
-on_disco_pubsub_identity(Acc, _From, _To, _, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_pubsub_identity", []),
+on_disco_pubsub_info(Acc, _, _, _, _) ->
+    ?DEBUG("on_disco_pubsub_info, returning Acc", []),
     Acc.
 
 %%-------------------------------------------------------------------------
 
-on_disco_reg_identity(Acc, _From, To, <<"">>, _Lang) ->
-    ?DEBUG("######## on_disco_reg_identity", []),
-    RegHost = jlib:jid_to_string(To),
+%on_disco_pubsub_identity(Acc, _From, #jid{lserver = PubsubHost}, <<"">>, _) ->
+%    F = fun() ->
+%        MatchHead = #push_backend{pubsub_host = PubsubHost, _='_'},
+%        case mnesia:select(push_backend, [{MatchHead, [], ['$_']}]) of
+%            [] -> Acc;
+%            _ ->
+%                PushIdentity =
+%                #xmlel{name = <<"identity">>,
+%                       attrs = [{<<"category">>, <<"pubsub">>},
+%                                {<<"type">>, <<"push">>}],
+%                       children = []},
+%                [PushIdentity|Acc]
+%        end
+%    end,
+%    case mnesia:transaction(F) of
+%        {atomic, AccOut} -> AccOut;
+%        _ -> Acc
+%    end;
+%
+%on_disco_pubsub_identity(Acc, _From, _To, _Node, _Lang) ->
+%    Acc.
+
+%%-------------------------------------------------------------------------
+
+on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
+    ?DEBUG("on_disco_reg_identitiy, RegHost = ~p", [RegHost]),
     F = fun() ->
         MatchHead =
         #push_backend{register_host = RegHost, app_name = '$1', _='_'},
@@ -1667,17 +1719,17 @@ on_disco_reg_identity(Acc, _From, To, <<"">>, _Lang) ->
                            children = []}
                 end,
                 AppNames),
-            ?DEBUG("returning ~p", [Identities ++ Acc]),
+            ?DEBUG("######## on_disco_reg_identity, returning ~p",
+                   [Identities ++ Acc]),
             Identities ++ Acc;
 
         _ ->
-            ?DEBUG("returning ~p", [Acc]),
+            ?DEBUG("######## on_disco_reg_identity, returning ~p", [Acc]),
             Acc
     end;
 
 on_disco_reg_identity(Acc, _From, _To, _, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_reg_identity", []),
-    ?DEBUG("returning ~p", [Acc]),
+    ?DEBUG("+++++++++ on_disco_reg_identity, returning ~p", [Acc]),
     Acc.
                
 % FIXME: hook disco_sm_info is not implemented yet!

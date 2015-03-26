@@ -28,6 +28,7 @@
 -author('christian@rechenwerk.net').
 
 -include("pubsub.hrl").
+-include("logger.hrl").
 -include("jlib.hrl").
 
 -behaviour(gen_pubsub_node).
@@ -101,6 +102,7 @@ options() ->
 
 % TODO: add publish-only-affiliation when implemented
 features() ->
+    ?DEBUG("+++++++ In node_push:features", []),
     [%"create-nodes",
      %"delete-nodes",
      <<"delete-items">>,
