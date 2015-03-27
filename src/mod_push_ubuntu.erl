@@ -151,12 +151,16 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %-------------------------------------------------------------------------
 
 expiry_time() ->
-    Now = os:timestamp(),
+    Now = now(),
     {_, Seconds, _} = Now,
     Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
-    {{Y, M, D}, {Hour, Min, Sec}} = calendar:now_to_universal_time(Time),
-    iolist_to_binary(io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
-                                   [Y, M, D, Hour, Min, Sec])).
+    jlib:now_to_utc_string(Time).
+    %Now = os:timestamp(),
+    %{_, Seconds, _} = Now,
+    %Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
+    %{{Y, M, D}, {Hour, Min, Sec}} = calendar:now_to_universal_time(Time),
+    %iolist_to_binary(io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
+    %                               [Y, M, D, Hour, Min, Sec])).
 
 %-------------------------------------------------------------------------
 

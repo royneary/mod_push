@@ -186,7 +186,7 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
         {#jid{luser = <<"">>, lserver = RegisterHost, lresource = <<"">>},
          #jid{luser = <<"">>, lserver = PubsubHost, lresource = <<"">>}} ->
             case Type of
-               ValidType when ValidType =:= up ->
+               ValidType when ValidType =:= ubuntu ->
                     AppName =
                     proplists:get_value(app_name, BackendOpts),
                     BackendId =
@@ -463,11 +463,12 @@ parse_form([], _FormType, _RequiredFields, _OptionalFields) ->
 
 parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
     case jlib:parse_xdata_submit(XDataForm) of
-        invalid ->
-            parse_form(T, FormType, RequiredFields, OptionalFields);
+        invalid -> parse_form(T, FormType, RequiredFields, OptionalFields);
         Fields ->
             GetValues =
                 fun
+                ({multi, Key}) -> get_xdata_values(Key, Fields);
+                ({single, Key}) -> get_xdata_value(Key, Fields);
                 ({Key, Convert}) ->
                     case Key of
                         {multi, Key} ->
@@ -493,12 +494,6 @@ parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
                                    catch error:badarg -> error
                                    end
                             end
-                    end;
-
-                (Key) ->
-                    case Key of
-                        {multi, Key} -> get_xdata_values(Key, Fields);
-                        {single, Key} ->  get_xdata_value(Key, Fields)
                     end
             end,
             case get_xdata_value(<<"FORM_TYPE">>, Fields) of
@@ -561,6 +556,7 @@ register_client(#jid{luser = LUser,
             %% FIXME: there might be type = apns, but app_name chatninja1 AND 
             %% chatninja2!
             [#push_backend{id = BackendId, pubsub_host = PubsubHost}|_] ->
+                ?DEBUG("register_client: found backend", []),
                 ChosenDeviceId = case DeviceId of
                     <<"">> -> LResource;
                     _ -> DeviceId
@@ -572,13 +568,14 @@ register_client(#jid{luser = LUser,
                 case ExistingReg of
                     [] ->
                         Secret = randoms:get_string(),
-                        NewNode = randoms:get_string(), 
+                        NewNode = randoms:get_string(),
+                        PubsubJid = ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
                         % FIXME: let create_node return NodeIdx is a workaround,
                         % instead there should be an exported function
                         % mod_pubsub:set_affiliation
                         {result, NodeIdx} =
                         mod_pubsub:create_node(RegisterHost, PubsubHost,
-                                               NewNode, PubsubHost, <<"push">>),
+                                               NewNode, PubsubJid, <<"push">>),
                         % FIXME: affiliation must be publish-only!
                         mod_pubsub:node_action(PubsubHost, <<"push">>,
                                                set_affiliation,
@@ -604,7 +601,9 @@ register_client(#jid{luser = LUser,
                 {PubsubHost, Registration#push_registration.node,
                  Registration#push_registration.secret};
             
-            _ -> error
+            _ ->
+                ?DEBUG("register_client: found no backend", []),
+                error
         end
     end,
     case mnesia:transaction(F) of
@@ -952,9 +951,8 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
 list_registrations(#jid{luser = LUser, lserver = LServer}) ->
     F = fun() ->
         MatchHead = #push_registration{id = {{LUser, LServer}, '_'},
-                                       device_name = '$1',
-                                       node = '$2'},
-        mnesia:select(push_registration, [{MatchHead, [], [{'$1', '$2'}]}])
+                                       _='_'},
+        mnesia:select(push_registration, [{MatchHead, [], ['$_']}])
     end,
     case mnesia:transaction(F) of
         {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
@@ -998,8 +996,16 @@ combine_to_atom(Atom1, Atom2, Term) ->
 
 %-------------------------------------------------------------------------
 
+ljid_to_jid({LUser, LServer, LResource}) ->
+    #jid{user = LUser, server = LServer, resource = LResource,
+         luser = LUser, lserver = LServer, lresource = LResource}.
+
+%-------------------------------------------------------------------------
+
 %% called on hook mgmt_queue_add_hook
-on_store_stanza(From, #jid{luser = LUser, lserver = LServer, lresource = LResource}, Stanza) ->
+on_store_stanza(From,
+                #jid{luser = LUser, lserver = LServer, lresource = LResource} = To,
+                Stanza) ->
     ?DEBUG("++++++++++++ Stored Stanza for ~p",
            [jlib:jid_to_string({LUser, LServer, LResource})]),
     PreferFullJid = fun(Subscriptions) ->
@@ -1063,10 +1069,9 @@ on_store_stanza(From, #jid{luser = LUser, lserver = LServer, lresource = LResour
                     
                 (#subscription{node = NodeId,
                                reg_type = {remote_reg, PubsubHost, Secret}}) -> 
-                    UserJid =
-                    #jid{user = LUser, server = LServer, resource = <<"">>,
-                         luser = LUser, lserver = LServer, lresource = LResource},
-                    dispatch_remote(UserJid, PubsubHost, NodeId, Payload, Secret)
+                    %#jid{user = LUser, server = LServer, resource = <<"">>,
+                    %     luser = LUser, lserver = LServer, lresource = LResource},
+                    dispatch_remote(To, PubsubHost, NodeId, Payload, Secret)
                 end, 
                 lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
         end
@@ -1340,11 +1345,6 @@ add_backends(Host, Opts) ->
                 fun({B, _}) ->
                     RegisterHost =B#push_backend.register_host,
                     PubsubHost = B#push_backend.pubsub_host,
-                    ejabberd_hooks:add(adhoc_local_commands,
-                                       RegisterHost,
-                                       ?MODULE,
-                                       process_adhoc_command,
-                                       one_queue),
                     ?INFO_MSG("added adhoc command handler for app server ~p",
                               [RegisterHost]),
                     % FIXME: publish options not implemented yet:
@@ -1404,6 +1404,12 @@ add_disco_hooks(ServerHost) ->
             ?DEBUG("Found push backend, register_host = ~p, pubsub_host = ~p",
                    [RegHost, PubsubHost]),
             register_new_route(RegHost),
+            ?DEBUG("adding to hook adhoc_local_commands, host = ~p", [RegHost]),
+            ejabberd_hooks:add(adhoc_local_commands,
+                               RegHost,
+                               ?MODULE,
+                               process_adhoc_command,
+                               75),
             %ejabberd_hooks:add(disco_local_identity, PubsubHost, ?MODULE,
             %                   on_disco_pubsub_identity, 50),
             % FIXME: this is a workaround, see below
@@ -1455,11 +1461,13 @@ stop(Host) ->
     F = fun() ->
         lists:foreach(fun(Id) ->
             [Backend] = mnesia:read({push_backend, Id}),
-            RegisterHost = Backend#push_backend.register_host,
+            RegHost = Backend#push_backend.register_host,
             PubsubHost = Backend#push_backend.pubsub_host,
-            ejabberd_router:unregister_route(RegisterHost),
+            ejabberd_router:unregister_route(RegHost),
             ejabberd_router:unregister_route(PubsubHost),
-            ejabberd_hooks:delete(disco_local_identity, RegisterHost, ?MODULE,
+            ejabberd_hooks:delete(adhoc_local_commands, RegHost, ?MODULE,
+                                  process_adhoc_command, 75),
+            ejabberd_hooks:delete(disco_local_identity, RegHost, ?MODULE,
                                   on_disco_reg_identity, 50),
             ejabberd_hooks:delete(disco_info, Host, ?MODULE,
                                   on_disco_pubsub_info, 50)
@@ -1472,15 +1480,16 @@ stop(Host) ->
 
 process_adhoc_command(Acc, From, #jid{lserver = LServer},
                       #adhoc_request{node = Command,
-                                     action = <<execute>>,
-                                     xdata = #xmlel{} = XData} = Request) ->
+                                     action = <<"execute">>,
+                                     xdata = XData} = Request) ->
+    ?DEBUG("++++++++++ process_adhoc_command", []),
     Result = case Command of
         %<<"register-push-apns">> ->
 
         %<<"register-push-gcm">> ->
 
         <<"register-push-ubuntu">> ->
-            Parsed = parse_form(XData,
+            Parsed = parse_form([XData],
                                 undefined,
                                 [{single, <<"token">>},
                                  {single, <<"application-id">>}],
@@ -1491,14 +1500,14 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                     register_client(From, LServer, ubuntu, Token,
                                     DeviceId, DeviceName, AppId, undefined);
                 
-                error -> error
+                _ -> error
             end;
 
         %<<"register-push-wns">> ->
             
 
         <<"unregister-push">> ->
-            Parsed = parse_form(XData, undefined,
+            Parsed = parse_form([XData], undefined,
                                 [], [{single, <<"device-id">>},
                                      {multi, <<"nodes">>}]),
             case Parsed of
@@ -1508,8 +1517,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                 _ -> error
             end;
 
-        <<"push-registrations">> ->
-            list_registrations(From);
+        <<"push-registrations">> -> list_registrations(From);
 
         _ -> ok
     end,
@@ -1557,7 +1565,9 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
         {registrations, RegList} ->
             Items =
             lists:foldl(
-                fun({Name, Node}, ItemsAcc) ->
+                fun(Reg, ItemsAcc) ->
+                    Name = Reg#push_registration.device_name,
+                    Node = Reg#push_registration.node,
                     [?ITEM([?VFIELD(<<"device-name">>, Name),
                             ?VFIELD(<<"node">>, Node)])
                      |ItemsAcc]
