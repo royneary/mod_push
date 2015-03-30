@@ -451,15 +451,22 @@ get_xdata_value(FieldName, Fields, DefaultValue) ->
     end.
 
 get_xdata_values(FieldName, Fields) ->
-    get_xdata_value(FieldName, Fields, []).
+    get_xdata_values(FieldName, Fields, []).
 
 get_xdata_values(FieldName, Fields, DefaultValue) ->
+    %case proplists:get_value(FieldName, Fields) of
+    %    undefined -> DefaultValue;
+    %    Values -> Values
+    %end.
     proplists:get_value(FieldName, Fields, DefaultValue).
     
 %-------------------------------------------------------------------------
 
 parse_form([], _FormType, _RequiredFields, _OptionalFields) ->
     not_found;
+
+parse_form([false|T], FormType, RequiredFields, OptionalFields) ->
+    parse_form(T, FormType, RequiredFields, OptionalFields);
 
 parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
     case jlib:parse_xdata_submit(XDataForm) of
@@ -558,6 +565,7 @@ register_client(#jid{luser = LUser,
             [#push_backend{id = BackendId, pubsub_host = PubsubHost}|_] ->
                 ?DEBUG("register_client: found backend", []),
                 ChosenDeviceId = case DeviceId of
+                    undefined -> LResource;
                     <<"">> -> LResource;
                     _ -> DeviceId
                 end,
@@ -749,16 +757,18 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
        #jid{lserver = PubsubHost} = Jid, Node, XDataForms) ->
     ParsedSecret =
     parse_form(XDataForms, ?NS_PUBLISH_OPTIONS, [], [{single, <<"secret">>}]),
+    ?DEBUG("ParsedSecret = ~p", [ParsedSecret]),
     Secret = case ParsedSecret of
-        error -> undefined;
-        [S] -> S
+        not_found -> undefined; 
+        error -> error;
+        {result, [S]} -> S
     end,
     case Secret of
         error -> {error, ?ERR_BAD_REQUEST}; 
         _ ->
             F = fun() ->
                 MatchHeadBackend =
-                #push_backend{id = '$1', pubsub_host = PubsubHost},
+                #push_backend{id = '$1', pubsub_host = PubsubHost, _='_'},
                 RegType =
                 case mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]) of
                     [] -> {remote_reg, jlib:jid_tolower(Jid), Secret};
@@ -829,22 +839,18 @@ disable(#jid{luser = LUser, lserver = LServer},
             [#push_user{subscriptions = Subscriptions} = User] ->
                 SubscriptionPred =
                 fun
-                    (NodePred, Subscr) when Subscr#subscription.node =:= NodePred,
-                                            Subscr#subscription.reg_type =:=
-                                            {local_reg, PubsubHost} ->
-                        true;
-                    (NodePred, Subscr) when Subscr#subscription.node =:= NodePred,
-                                            Subscr#subscription.reg_type =:=
-                                            {remote_reg, LJid, '_'} ->
-                        true;
-                    (_, _) -> false
+                    (NodePred, #subscription{node = N, reg_type = RegT}) ->
+                        NodeMatching =
+                        (NodePred =:= undefined) or (NodePred =:= N),
+                        RegTypeMatching =
+                        case RegT of
+                            {local_reg, P} -> P =:= PubsubHost;
+                            {remote_reg, J, _} -> J =:= LJid
+                        end,
+                        NodeMatching and RegTypeMatching
                 end,
-                NodeArg = case Node of
-                    undefined -> '_';
-                    _ -> Node
-                end, 
                 {MatchingSubscrs, NotMatchingSubscrs} =
-                lists:partition(fun(S) -> SubscriptionPred(NodeArg, S) end,
+                lists:partition(fun(S) -> SubscriptionPred(Node, S) end,
                                 Subscriptions),
                 case MatchingSubscrs of
                     [] -> error;
@@ -877,7 +883,8 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
     GetPubsubHost =
     fun(BackendId) ->
         MatchHead =
-        #push_backend{id = BackendId, register_host = RegisterHost, pubsub_host = '$1'},
+        #push_backend{id = BackendId, register_host = RegisterHost,
+                      pubsub_host = '$1', _='_'},
         case mnesia:select(push_backend, [{MatchHead, [], ['$1']}]) of
             [] -> error;
             [PubsubHost] -> PubsubHost
@@ -896,6 +903,7 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                              {{LUser, LServer}, ChosenDeviceId}}),
                 case MatchingReg of
                     [] -> error;
+
                     [#push_registration{node = NodeId,
                                         backend_id = BackendId}] ->
                         case GetPubsubHost(BackendId) of
@@ -916,31 +924,38 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
             GivenNodes ->
                 MatchHead = #push_registration{id = {{LUser, LServer}, '_'},
                                                node = '$1',
-                                               backend_id = '$2',
                                                _='_'},
-                Guard = {fun(N) -> lists:member(N, GivenNodes) end, '$1'},
+                SelectedRegs =
+                mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
                 MatchingRegs =
-                mnesia:select(push_registration, [{MatchHead, [Guard], ['$2']}]),
+                lists:filter(
+                    fun(#push_registration{node = N}) ->
+                        lists:member(N, GivenNodes)
+                    end,
+                    SelectedRegs),
                 case MatchingRegs of
                     [] -> error;
-                    [BackendId] ->
-                        case GetPubsubHost(BackendId) of
-                            error -> error;
+                    _ ->
+                        lists:foldl(
+                             fun(#push_registration{id = Id,
+                                                    node = Node,
+                                                    backend_id = BackendId}, Acc) ->
+                                 case GetPubsubHost(BackendId) of
+                                     error ->
+                                        Acc;
 
-                            PubsubHost ->
-                                lists:foldl(
-                                    fun(#push_registration{id = Id, node = N}, Acc) ->
-                                        mod_pubsub:delete_node(PubsubHost, N, PubsubHost),
+                                     PubsubHost ->
+                                        mod_pubsub:delete_node(PubsubHost, Node, PubsubHost),
                                         mnesia:delete({push_registration, Id}),
-                                        [N|Acc]
-                                    end,
-                                    [],
-                                    MatchingRegs)
-                        end
+                                        [Node|Acc]
+                                end
+                             end,
+                             [],
+                             MatchingRegs)
                 end
         end
     end,
-    case mnesia:transcation(F) of
+    case mnesia:transaction(F) of
         {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
         {atomic, error} -> error;
         {atomic, Result} -> {unregistered, Result}
@@ -1514,6 +1529,9 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                 {result, [DeviceId, NodeIds]} -> 
                     unregister_client(From, LServer, DeviceId, NodeIds);
 
+                not_found ->
+                    unregister_client(From, LServer, undefined, []);
+
                 _ -> error
             end;
 
@@ -1566,22 +1584,24 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             Items =
             lists:foldl(
                 fun(Reg, ItemsAcc) ->
-                    Name = Reg#push_registration.device_name,
-                    Node = Reg#push_registration.node,
-                    [?ITEM([?VFIELD(<<"device-name">>, Name),
-                            ?VFIELD(<<"node">>, Node)])
-                     |ItemsAcc]
+                    NameField = case Reg#push_registration.device_name of
+                        undefined -> [];
+                        Name -> [?VFIELD(<<"device-name">>, Name)]
+                    end,
+                    NodeField =
+                    [?VFIELD(<<"node">>, Reg#push_registration.node)],
+                    [?ITEM(NameField ++ NodeField) | ItemsAcc]
                 end,
                 [],
                 RegList),
             Response =
             #adhoc_response{
-               status = completed,
-               elements = [#xmlel{name = <<"x">>,
-                                  attrs = [{<<"xmlns">>, ?NS_XDATA},
-                                           {<<"type">>, <<"result">>}],
-                                  children = Items}]},
-               adhoc:produce_response(Request, Response);
+                status = completed,
+                elements = [#xmlel{name = <<"x">>,
+                                   attrs = [{<<"xmlns">>, ?NS_XDATA},
+                                            {<<"type">>, <<"result">>}],
+                                   children = Items}]},
+                adhoc:produce_response(Request, Response);
 
         error -> {error, ?ERR_BAD_REQUEST};
 
