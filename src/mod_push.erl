@@ -276,7 +276,7 @@ get_certfile(Opts) ->
     }
 )).
 
--define(HFIELD(Val), ?TVFIELD(<<"hidden">>, <<"FORM_TYPE">>, Val)).
+-define(HFIELD(Val), ?TVFIELD(<<"hidden">>, <<"FORM_TYPE">>, [Val])).
 
 -define(ITEM(Fields),
 (
@@ -454,10 +454,6 @@ get_xdata_values(FieldName, Fields) ->
     get_xdata_values(FieldName, Fields, []).
 
 get_xdata_values(FieldName, Fields, DefaultValue) ->
-    %case proplists:get_value(FieldName, Fields) of
-    %    undefined -> DefaultValue;
-    %    Values -> Values
-    %end.
     proplists:get_value(FieldName, Fields, DefaultValue).
     
 %-------------------------------------------------------------------------
@@ -476,8 +472,8 @@ parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
                 fun
                 ({multi, Key}) -> get_xdata_values(Key, Fields);
                 ({single, Key}) -> get_xdata_value(Key, Fields);
-                ({Key, Convert}) ->
-                    case Key of
+                ({KeyTuple, Convert}) ->
+                    case KeyTuple of
                         {multi, Key} ->
                             Values = get_xdata_values(Key, Fields),
                             Converted = lists:foldl(
@@ -494,7 +490,6 @@ parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
 
                         {single, Key} ->
                             case get_xdata_value(Key, Fields) of
-                                undefined -> undefined;
                                 error -> error;
                                 Value ->
                                    try Convert(Value)
@@ -657,7 +652,7 @@ make_config(XDataForms,
                          include_subscription_count = DefIncSubscrCount,
                          include_message_bodies = DefIncMsgBodies} = DefConfig,
             ConfigPrivilege) ->
-    %% if a user is allowed to change an option and ,
+    %% if a user is allowed to change an option from OldValue to NewValue,
     %% OptionAllowed(OldValue, NewValue) returns true
     OptionAllowed = case ConfigPrivilege of
         disable_only ->
@@ -671,13 +666,15 @@ make_config(XDataForms,
                 (_, _) -> true
             end
     end,
+    AllowedOpts =
+    [<<"include-senders">>, <<"include-message-count">>,
+     <<"include-subscription-count">>, <<"include-message-bodies">>],
     OptionalFields =
     lists:map(
         fun(F) -> {{single, F},
-                   fun(B) -> {F, binary_to_boolean(B, undefined)} end}
+                   fun(B) -> binary_to_boolean(B, undefined) end}
         end,
-        [<<"include-senders">>, <<"include-message-count">>,
-         <<"include-subscription-count">>, <<"include-message-bodies">>]),
+        AllowedOpts),
     ParseResult = parse_form(XDataForms, ?NS_PUSH_OPTIONS, [], OptionalFields),
     case ParseResult of
         error -> error;
@@ -687,7 +684,7 @@ make_config(XDataForms,
         {result, ParsedTupleList} ->
             AnyError = lists:any(
                 fun
-                    ({_, error}) -> true;
+                    (error) -> true;
                     (_) -> false
                 end,
                 ParsedTupleList),
@@ -696,8 +693,8 @@ make_config(XDataForms,
                     error;
 
                 false ->
-                    [{_, IncSenders}, {_, IncMsgCount}, {_, IncSubscrCount},
-                     {_, IncMsgBodies}] = ParsedTupleList,
+                    [IncSenders, IncMsgCount, IncSubscrCount, IncMsgBodies] =
+                    ParsedTupleList,
                     Config =
                     #user_config{
                         include_senders =
@@ -722,7 +719,7 @@ make_config(XDataForms,
                         end},
                         ChangedOptsFields =
                         lists:filtermap(
-                            fun({OldValue, {Opt, NewValue}}) ->
+                            fun({Opt, OldValue, NewValue}) ->
                                case OptionAllowed(OldValue, NewValue) of
                                     true ->
                                         {true,
@@ -731,16 +728,24 @@ make_config(XDataForms,
                                     false -> false
                                 end
                             end,
-                            lists:zip([DefIncSenders, DefIncMsgCount,
-                                       DefIncSubscrCount, DefIncMsgBodies],
-                                      ParsedTupleList)),
-                        ResponseForm = 
-                        [#xmlel{
-                            name = <<"x">>,
-                            attrs = [{<<"xmlns">>, ?NS_XDATA},
-                                     {<<"type">>, <<"result">>}],
-                            children =
-                            [?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]}],
+                            lists:zip3(
+                                AllowedOpts,
+                                [DefIncSenders, DefIncMsgCount,
+                                 DefIncSubscrCount, DefIncMsgBodies],
+                                ParsedTupleList)),
+                        ?DEBUG("ChangedOptsFields = ~p", [ChangedOptsFields]),
+                        ?DEBUG("Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
+                        ResponseForm = case ChangedOptsFields of
+                            [] -> [];
+                            _ ->
+                                [#xmlel{
+                                    name = <<"x">>,
+                                    attrs = [{<<"xmlns">>, ?NS_XDATA},
+                                             {<<"type">>, <<"result">>}],
+                                    children =
+                                    [?HFIELD(?NS_PUSH_OPTIONS)|
+                                     ChangedOptsFields]}]
+                        end,
                         {Config, ResponseForm}
             end
     end.
@@ -816,7 +821,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                 end
             end,
             case mnesia:transaction(F) of
-                {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
+                {aborted, Reason} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
                 {atomic, error} -> {error, ?ERR_NOT_ACCEPTABLE};
                 {atomic, []} -> {enabled, ok};
                 {atomic, ResponseForm} -> {enabled, ResponseForm}
@@ -928,11 +933,8 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                 SelectedRegs =
                 mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
                 MatchingRegs =
-                lists:filter(
-                    fun(#push_registration{node = N}) ->
-                        lists:member(N, GivenNodes)
-                    end,
-                    SelectedRegs),
+                [R || #push_registration{node = N} = R <- SelectedRegs,
+                      lists:member(N, GivenNodes)],
                 case MatchingRegs of
                     [] -> error;
                     _ ->
@@ -1636,7 +1638,7 @@ process_iq(From, _To, #iq{type = Type, sub_el = SubEl} = IQ) ->
                                 {enabled, ResponseChildren} -> 
                                     NewSubEl =
                                     SubEl#xmlel{children = ResponseChildren},
-                                    IQ#iq{type = result, sub_el = NewSubEl};
+                                    IQ#iq{type = result, sub_el = [NewSubEl]};
 
                                 {error, Error} ->
                                     IQ#iq{type = error,
