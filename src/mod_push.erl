@@ -821,7 +821,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                 end
             end,
             case mnesia:transaction(F) of
-                {aborted, Reason} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
+                {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
                 {atomic, error} -> {error, ?ERR_NOT_ACCEPTABLE};
                 {atomic, []} -> {enabled, ok};
                 {atomic, ResponseForm} -> {enabled, ResponseForm}
