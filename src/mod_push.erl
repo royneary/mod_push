@@ -207,6 +207,7 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                         pubsub_host = PubsubHost,
                         type = Type,
                         app_name = AppName,
+                        cluster_nodes = [node()],
                         worker = Worker
                     },
                     parse_backends(T, Host, CertFile, [{Backend, AuthData}|Acc]);
@@ -357,7 +358,7 @@ make_payload_record(From, Stanza, OldRecord) ->
                 _ -> OldRecord
             end;
 
-        _ -> OldRecord
+        _ -> empty
     end.
 
 %-------------------------------------------------------------------------
@@ -805,7 +806,9 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                             {Config, ResponseForm} -> 
                                 FilterNode =
                                 fun
-                                    (S) when S#subscription.node =:= Node -> false;
+                                    (S) when S#subscription.node =:= Node;
+                                             S#subscription.resource =:= LResource ->
+                                        false;
                                     (_) -> true
                                 end,
                                 NewSubscriptions =
@@ -1034,7 +1037,7 @@ on_store_stanza(From,
             Subscriptions),
         case MatchingFullJid of
             [] -> Subscriptions;
-            [S] -> S
+            [Matching] -> [Matching]
         end
     end,
     F = fun() ->
@@ -1044,53 +1047,42 @@ on_store_stanza(From,
             [#push_user{subscriptions = Subscriptions,
                         config = Config,
                         payload = StoredPayload} = User] ->
-                PayloadRecord = make_payload_record(From, Stanza, StoredPayload),
-                mnesia:write(User#push_user{payload = PayloadRecord}),
-                Payload = make_payload(PayloadRecord, Config),
-                ProcessSubscription =
-                fun
-                (#subscription{node = NodeId, reg_type = {local_reg, _}}) ->
-                    MatchHeadReg =
-                    #push_registration{id = {{LUser, LServer}, '_'},
-                                       node = NodeId, _='_'},
-                    SelectedRegs =
-                    mnesia:select(push_registration, [{MatchHeadReg, [], ['$_']}]),
-                    case SelectedRegs of
-                        [] ->
-                            ?DEBUG("No registration found for user ~p",
-                                   [jlib:jid_to_string({LUser, LServer, LResource})]),
-                            error;
+                case make_payload_record(From, Stanza, StoredPayload) of
+                    empty -> ok;
+                    PayloadRecord ->
+                        mnesia:write(User#push_user{payload = PayloadRecord}),
+                        Payload = make_payload(PayloadRecord, Config),
+                        ProcessSubscription =
+                        fun
+                        (#subscription{node = NodeId,
+                                       reg_type = {local_reg, _}}) ->
+                            MatchHeadReg =
+                            #push_registration{id = {{LUser, LServer}, '_'},
+                                               node = NodeId, _='_'},
+                            SelectedRegs =
+                            mnesia:select(push_registration,
+                                          [{MatchHeadReg, [], ['$_']}]),
+                            case SelectedRegs of
+                                [] -> error;
 
-                        [#push_registration{id = RegId,
-                                            token = Token,
-                                            app_id = AppId,
-                                            backend_id = BackendId,
-                                            silent_push = Silent,
-                                            timestamp = Timestamp}] ->
-                            dispatch_local(Payload, Token, AppId, BackendId,
-                                           Silent, RegId, Timestamp, true)
-                    end;
-                        %Registrations ->
-                        %    lists:foreach(
-                        %        fun(#push_registration{bare_jid = BJid,
-                        %                               token = Token,
-                        %                               app_id = AppId,
-                        %                               backend_id = BackendId,
-                        %                               silent_push = Silent,
-                        %                               timestamp = Timestamp}) ->
-                        %            dispatch_local(Payload, Token, AppId,
-                        %                           BackendId, Silent, BJid,
-                        %                           Timestamp),
-                        %        end,
-                        %        Registrations);
-                    
-                (#subscription{node = NodeId,
-                               reg_type = {remote_reg, PubsubHost, Secret}}) -> 
-                    %#jid{user = LUser, server = LServer, resource = <<"">>,
-                    %     luser = LUser, lserver = LServer, lresource = LResource},
-                    dispatch_remote(To, PubsubHost, NodeId, Payload, Secret)
-                end, 
-                lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
+                                [#push_registration{id = RegId,
+                                                    token = Token,
+                                                    app_id = AppId,
+                                                    backend_id = BackendId,
+                                                    silent_push = Silent,
+                                                    timestamp = Timestamp}] ->
+                                    ?DEBUG("++++ on_store_stanza: found registration, dispatch locally", []),
+                                    dispatch_local(Payload, Token, AppId, BackendId,
+                                                   Silent, RegId, Timestamp, true)
+                            end;
+                           
+                        (#subscription{node = NodeId,
+                                       reg_type = {remote_reg, PubsubHost, Secret}}) -> 
+                            ?DEBUG("++++ on_store_stanza: dispatching remotely", []),
+                            dispatch_remote(To, PubsubHost, NodeId, Payload, Secret)
+                        end,
+                        lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
+                end
         end
     end,
     mnesia:transaction(F).
@@ -1112,13 +1104,12 @@ on_store_stanza(From,
 
 dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
                AllowRelay) ->
-   DisableArgs = {RegId, Timestamp},
-    MatchHeadBackend = #push_backend{id = BackendId, worker = '$1',
-                                     cluster_nodes = '$2', _='_'},
-    [{Worker, ClusterNodes}] =
-    mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1', '$2']}]),
+    DisableArgs = {RegId, Timestamp},
+    [#push_backend{worker = Worker, cluster_nodes = ClusterNodes}] =
+    mnesia:read({push_backend, BackendId}),
     case lists:member(node(), ClusterNodes) of
         true ->
+            ?DEBUG("+++++ dispatch_local: calling worker", []),
             gen_server:cast(Worker,
                             {dispatch,
                              Payload, Token, AppId, Silent, DisableArgs});
@@ -1374,7 +1365,8 @@ add_backends(Host, Opts) ->
                     case mnesia:read({push_backend, B#push_backend.id}) of
                         [] -> B;
                         [#push_backend{cluster_nodes = Nodes}] ->
-                            NewNodes = lists:merge(Nodes, [node()]),
+                            NewNodes =
+                            lists:merge(Nodes, B#push_backend.cluster_nodes),
                             B#push_backend{cluster_nodes = NewNodes}
                     end,
                     ?DEBUG("######### writing to push_backend: ~p", [B]),
