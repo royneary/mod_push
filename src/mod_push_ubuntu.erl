@@ -36,7 +36,6 @@
          terminate/2,
          code_change/3]).
 
-%-include("mod_push.hrl").
 -include("logger.hrl").
 
 -define(PUSH_URL, "https://push.ubuntu.com/notify").
@@ -132,35 +131,11 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %-------------------------------------------------------------------------
 
-%make_data(Sender, MsgCount, Sid) ->
-%    SidPart = case Sid of
-%        <<"">> -> [];
-%        undefined -> [];
-%        _ -> [{session_id, Sid}]
-%    end,
-%    SenderPart = case Sender of
-%        undefined -> [];
-%        _ -> [{message_sender, jlib:jid_to_string(Sender)}]
-%    end,
-%    MsgCountPart = case MsgCount of
-%        undefined -> [];
-%        _ -> [{message_count, MsgCount}]
-%    end,
-%    {struct, SidPart ++ SenderPart ++ MsgCountPart}.
-
-%-------------------------------------------------------------------------
-
 expiry_time() ->
     Now = now(),
     {_, Seconds, _} = Now,
     Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
     jlib:now_to_utc_string(Time).
-    %Now = os:timestamp(),
-    %{_, Seconds, _} = Now,
-    %Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
-    %{{Y, M, D}, {Hour, Min, Sec}} = calendar:now_to_universal_time(Time),
-    %iolist_to_binary(io_lib:format("~4..0B-~2..0B-~2..0BT~2..0B:~2..0B:~2..0BZ",
-    %                               [Y, M, D, Hour, Min, Sec])).
 
 %-------------------------------------------------------------------------
 
