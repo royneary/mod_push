@@ -317,7 +317,7 @@ register_client(#jid{luser = LUser,
 (
     jid(),
     RegisterHost :: binary(),
-    DeviceId :: {bare_jid(), device_id()},
+    DeviceId :: binary(),
     NodeIds :: [binary()])
     -> error | {error, xmlelement()} | {unregistered, ok} |
        {unregistered, [binary()]}
@@ -568,7 +568,7 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
 -spec(delete_registration/2 ::
 (
     BJid :: bare_jid(),
-    Timestamp :: integer())
+    Timestamp :: erlang:timestamp())
     -> any()
 ).
 
