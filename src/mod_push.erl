@@ -414,7 +414,7 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
     Jid :: jid(),
     Node :: binary(),
     XData :: [false | xmlelement()])
-    -> {error, xmlelement()} | {enabled, ok} | {enabled, xmlelement()}
+    -> {error, xmlelement()} | {enabled, ok} | {enabled, [xmlelement()]}
 ).
 
 enable(_From, _Jid, undefined, _XDataForms) ->
@@ -1469,7 +1469,7 @@ get_global_config(Host) ->
     XDataForms :: [xmlelement()],
     DefConfig :: user_config(),
     ConfigPrivilege :: disable_only | enable_disable)
-    -> {user_config(), xmlelement()}
+    -> {user_config(), [xmlelement()]}
 ).
 
 make_config(XDataForms,
