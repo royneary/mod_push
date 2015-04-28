@@ -1657,7 +1657,7 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
     From :: jid(),
     Stanza :: xmlelement(),
     OldRecord :: payload_record())
-    -> payload_record()
+    -> payload_record() | empty
 ).
 
 make_payload_record(From, Stanza, OldRecord) ->
