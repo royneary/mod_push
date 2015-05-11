@@ -103,20 +103,20 @@ options() ->
 % TODO: add publish-only-affiliation when implemented
 features() ->
     ?DEBUG("+++++++ In node_push:features", []),
-    [%"create-nodes",
-     %"delete-nodes",
+    [<<"create-nodes">>,
+     <<"delete-nodes">>,
      <<"delete-items">>,
-     %"instant-nodes",
+     <<"instant-nodes">>,
      %"outcast-affiliation",
-     %"persistent-items",
-     <<"publish">>
+     <<"persistent-items">>,
+     <<"publish">>,
      %"purge-nodes",
      %"retract-items",
-     %"retrieve-affiliations",
-     %"retrieve-items",
-     %"retrieve-subscriptions",
-     %"subscribe",
-     %"subscription-notifications"
+     %%<<"retrieve-affiliations">>,
+     %%<<"retrieve-items">>,
+     %%<<"retrieve-subscriptions">>,
+     <<"subscribe">>,
+     <<"subscription-notifications">>
     ].
 
 create_node_permission(_Host, _ServerHost, _Node, _ParentNode, _Owner, _Access) ->
@@ -136,21 +136,23 @@ unsubscribe_node(NodeId, Sender, Subscriber, SubID) ->
     node_hometree:unsubscribe_node(NodeId, Sender, Subscriber, SubID).
 
 publish_item(NodeIdx, Publisher, Model, MaxItems, ItemId, Payload) ->
-    %% TODO: don't really publish item, only call hook?
-    case node_hometree:publish_item(NodeIdx, Publisher, Model, MaxItems, ItemId, Payload) of
-        {result, {default, broadcast, _}} ->
-            #pubsub_node{nodeid = {Host, NodeId}} =
-            nodetree_tree:get_node(NodeIdx),
-            Authenticated =
-            ejabberd_hooks:run_fold(node_push_publish_item, Host,
-                                    false, [Host, NodeId, Payload]),
-            case Authenticated of
-                true -> {result, ok};
-                false -> {error, ?ERR_NOT_AUTHORIZED}
-            end;
+    ejabberd_hooks:run(node_push_publish_item, Host, [NodeIdx, Payload]). 
 
-        Error -> Error
-    end. 
+    %%%% TODO: don't really publish item, only call hook?
+    %%case node_hometree:publish_item(NodeIdx, Publisher, Model, MaxItems, ItemId, Payload) of
+    %%    {result, {default, broadcast, _}} ->
+    %%        #pubsub_node{nodeid = {Host, NodeId}} =
+    %%        nodetree_tree:get_node(NodeIdx),
+    %%        Authenticated =
+    %%        ejabberd_hooks:run_fold(node_push_publish_item, Host,
+    %%                                false, [Host, NodeId, Payload]),
+    %%        case Authenticated of
+    %%            true -> {result, ok};
+    %%            false -> {error, ?ERR_NOT_AUTHORIZED}
+    %%        end;
+
+    %%    Error -> Error
+    %%end. 
 
 remove_extra_items(NodeId, MaxItems, ItemIds) ->
     node_hometree:remove_extra_items(NodeId, MaxItems, ItemIds).
