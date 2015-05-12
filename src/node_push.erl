@@ -33,14 +33,6 @@
 
 -behaviour(gen_pubsub_node).
 
-%% Note on function definition
-%%   included is all defined plugin function
-%%   it's possible not to define some function at all
-%%   in that case, warning will be generated at compilation
-%%   and function call will fail,
-%%   then mod_pubsub will call function from node_hometree
-%%   (this makes code cleaner, but execution a little bit longer)
-
 %% API definition
 -export([init/3, terminate/2,
 	 options/0, features/0,
@@ -65,8 +57,8 @@
 	 get_states/1,
 	 get_state/2,
 	 set_state/1,
-	 get_items/6,
-	 get_items/2,
+	 get_items/3,
+	 get_items/7,
 	 get_item/7,
 	 get_item/2,
 	 set_item/1,
@@ -83,133 +75,135 @@ terminate(Host, ServerHost) ->
     node_hometree:terminate(Host, ServerHost).
 
 options() ->
-    [{deliver_payloads, false},
+    [{deliver_payloads, true},
      {notify_config, false},
      {notify_delete, false},
-     {notify_retract, false},
+     {notify_retract, true},
      {purge_offline, false},
-     {persist_items, false},
-     {max_items, ?MAXITEMS},
-     {subscribe, false},
+     {persist_items, true},
+     {max_items, 1},
+     {subscribe, true},
      {access_model, whitelist},
      {roster_groups_allowed, []},
-     {publish_model, publishers},
+     {publish_model, publish_only},
      {notification_type, headline},
      {max_payload_size, ?MAX_PAYLOAD_SIZE},
      {send_last_published_item, never},
-     {deliver_notifications, false},
+     {deliver_notifications, true},
      {presence_based_delivery, false}].
 
-% TODO: add publish-only-affiliation when implemented
 features() ->
-    ?DEBUG("+++++++ In node_push:features", []),
     [<<"create-nodes">>,
      <<"delete-nodes">>,
      <<"delete-items">>,
      <<"instant-nodes">>,
-     %"outcast-affiliation",
+     <<"modify-affiliations">>,
+     <<"multi-subscribe">>,
      <<"persistent-items">>,
      <<"publish">>,
-     %"purge-nodes",
-     %"retract-items",
-     %%<<"retrieve-affiliations">>,
-     %%<<"retrieve-items">>,
-     %%<<"retrieve-subscriptions">>,
+     <<"publish-only-affiliation">>,
+     <<"purge-nodes">>,
+     <<"retrieve-affiliations">>,
+     <<"retrieve-items">>,
+     <<"retrieve-subscriptions">>,
      <<"subscribe">>,
-     <<"subscription-notifications">>
-    ].
+     <<"subscription-options">>].
 
-create_node_permission(_Host, _ServerHost, _Node, _ParentNode, _Owner, _Access) ->
-    {result, true}.
+create_node_permission(Host, ServerHost, Node, ParentNode, Owner, Access) ->
+    node_flat:create_node_permission(Host, ServerHost, Node, ParentNode, Owner, Access).
 
-create_node(NodeIdx, Owner) ->
-    node_hometree:create_node(NodeIdx, Owner),
-    {result, NodeIdx}.
+create_node(Nidx, Owner) ->
+    node_hometree:create_node(Nidx, Owner).
         
 delete_node(Removed) ->
     node_hometree:delete_node(Removed).
 
-subscribe_node(NodeId, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup, Options) ->
-    node_hometree:subscribe_node(NodeId, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup, Options).
+subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup, Options) ->
+    node_flat:subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast,
+                             PresenceSubscription, RosterGroup, Options).
 
-unsubscribe_node(NodeId, Sender, Subscriber, SubID) ->
-    node_hometree:unsubscribe_node(NodeId, Sender, Subscriber, SubID).
+unsubscribe_node(Nidx, Sender, Subscriber, SubID) ->
+    node_hometree:unsubscribe_node(Nidx, Sender, Subscriber, SubID).
 
-publish_item(NodeIdx, Publisher, Model, MaxItems, ItemId, Payload) ->
-    ejabberd_hooks:run(node_push_publish_item, Host, [NodeIdx, Payload]). 
+publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
+    %% mod_push's internal app server must use nodetree_virtual and receives
+    %% the published items from the node_push_publish_item hook, an XEP-0114-
+    %% connected app server must use nodetree_tree and receives the items via
+    %% XEP-0060 notification stanzas
+    VirtualNode = nodetree_virtual:get_node(Nidx),
+    [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
+    NodeId = VirtualNode#pubsub_node.nodeid,
+    Result =
+    ejabberd_hooks:run_fold(node_push_publish_item, Host, none,
+                            [NodeId, Payload]),
+    case Result of
+        none ->
+            node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
+                                       ItemId, Payload);
 
-    %%%% TODO: don't really publish item, only call hook?
-    %%case node_hometree:publish_item(NodeIdx, Publisher, Model, MaxItems, ItemId, Payload) of
-    %%    {result, {default, broadcast, _}} ->
-    %%        #pubsub_node{nodeid = {Host, NodeId}} =
-    %%        nodetree_tree:get_node(NodeIdx),
-    %%        Authenticated =
-    %%        ejabberd_hooks:run_fold(node_push_publish_item, Host,
-    %%                                false, [Host, NodeId, Payload]),
-    %%        case Authenticated of
-    %%            true -> {result, ok};
-    %%            false -> {error, ?ERR_NOT_AUTHORIZED}
-    %%        end;
+        ok -> {result, ok};
 
-    %%    Error -> Error
-    %%end. 
+        _ -> {error, ?ERR_NOT_AUTHORIZED}
+    end.
+    
+remove_extra_items(Nidx, MaxItems, ItemIds) ->
+    node_hometree:remove_extra_items(Nidx, MaxItems, ItemIds).
 
-remove_extra_items(NodeId, MaxItems, ItemIds) ->
-    node_hometree:remove_extra_items(NodeId, MaxItems, ItemIds).
+delete_item(Nidx, Publisher, PublishModel, ItemId) ->
+    node_hometree:delete_item(Nidx, Publisher, PublishModel, ItemId).
 
-delete_item(NodeId, Publisher, PublishModel, ItemId) ->
-    node_hometree:delete_item(NodeId, Publisher, PublishModel, ItemId).
-
-purge_node(NodeId, Owner) ->
-    node_hometree:purge_node(NodeId, Owner).
+purge_node(Nidx, Owner) ->
+    node_hometree:purge_node(Nidx, Owner).
 
 get_entity_affiliations(Host, Owner) ->
     node_hometree:get_entity_affiliations(Host, Owner).
 
-get_node_affiliations(NodeId) ->
-    node_hometree:get_node_affiliations(NodeId).
+get_node_affiliations(Nidx) ->
+    node_hometree:get_node_affiliations(Nidx).
 
-get_affiliation(NodeId, Owner) ->
-    node_hometree:get_affiliation(NodeId, Owner).
+get_affiliation(Nidx, Owner) ->
+    node_hometree:get_affiliation(Nidx, Owner).
 
-set_affiliation(NodeId, Owner, Affiliation) ->
-    node_hometree:set_affiliation(NodeId, Owner, Affiliation).
+set_affiliation(Nidx, Owner, Affiliation) ->
+    node_hometree:set_affiliation(Nidx, Owner, Affiliation).
 
 get_entity_subscriptions(Host, Owner) ->
     node_hometree:get_entity_subscriptions(Host, Owner).
 
-get_node_subscriptions(NodeId) ->
-    node_hometree:get_node_subscriptions(NodeId).
+get_node_subscriptions(Nidx) ->
+    node_hometree:get_node_subscriptions(Nidx).
 
-get_subscriptions(NodeId, Owner) ->
-    node_hometree:get_subscriptions(NodeId, Owner).
+get_subscriptions(Nidx, Owner) ->
+    node_hometree:get_subscriptions(Nidx, Owner).
 
-set_subscriptions(NodeId, Owner, Subscription, SubId) ->
-    node_hometree:set_subscriptions(NodeId, Owner, Subscription, SubId).
+set_subscriptions(Nidx, Owner, Subscription, SubId) ->
+    node_hometree:set_subscriptions(Nidx, Owner, Subscription, SubId).
 
 get_pending_nodes(Host, Owner) ->
     node_hometree:get_pending_nodes(Host, Owner).
 
-get_states(NodeId) ->
-    node_hometree:get_states(NodeId).
+get_states(Nidx) ->
+    node_hometree:get_states(Nidx).
 
-get_state(NodeId, JID) ->
-    node_hometree:get_state(NodeId, JID).
+get_state(Nidx, JID) ->
+    node_hometree:get_state(Nidx, JID).
 
 set_state(State) ->
     node_hometree:set_state(State).
 
-get_items(NodeId, From) ->
-    node_hometree:get_items(NodeId, From).
+get_items(Nidx, From, RSM) ->
+    node_hometree:get_items(Nidx, From, RSM).
 
-get_items(NodeId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId) ->
-    node_hometree:get_items(NodeId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId).
-    
-get_item(NodeId, ItemId) ->
-    node_hometree:get_item(NodeId, ItemId).
+get_items(Nidx, JID, AccessModel, PresenceSubscription, RosterGroup, SubId, RSM) ->
+    node_hometree:get_items(Nidx, JID, AccessModel,
+	PresenceSubscription, RosterGroup, SubId, RSM).
 
-get_item(NodeId, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId) ->
-    node_hometree:get_item(NodeId, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId).
+get_item(Nidx, ItemId) ->
+    node_hometree:get_item(Nidx, ItemId).
+
+get_item(Nidx, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId) ->
+    node_hometree:get_item(Nidx, ItemId, JID, AccessModel, PresenceSubscription,
+                           RosterGroup, SubId).
     
 set_item(Item) ->
     node_hometree:set_item(Item).
@@ -217,6 +211,6 @@ set_item(Item) ->
 get_item_name(Host, Node, Id) ->
     node_hometree:get_item_name(Host, Node, Id).
 
-node_to_path(Node) -> node_hometree:node_to_path(Node).
+node_to_path(Node) -> node_flat:node_to_path(Node).
 
-path_to_node(Path) -> node_hometree:path_to_node(Path).
+path_to_node(Path) -> node_flat:path_to_node(Path).
