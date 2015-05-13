@@ -82,7 +82,7 @@
          on_disco_pubsub_info/5,
          on_disco_reg_identity/5,
          process_adhoc_command/4,
-         delete_registration/2]).
+         unregister_client/2]).
 
 -include("logger.hrl").
 -include("jlib.hrl").
@@ -308,6 +308,22 @@ register_client(#jid{luser = LUser,
 
 %-------------------------------------------------------------------------
 
+%% Callback for workers
+
+-spec(unregister_client/2 ::
+(
+    RegId :: {bare_jid(), device_id()},
+    Timestamp :: erlang:timestamp())
+    -> error | {error, xmlelement()} | {unregistered, ok} |
+       {unregistered, [binary()]}
+).
+
+unregister_client({{User, Server}, DeviceId}, Timestamp) ->
+    unregister_client(ljid_to_jid({User, Server, <<"">>}), DeviceId, Timestamp,
+                      []).
+
+%-------------------------------------------------------------------------
+
 %% Either device ID or a list of node IDs must be given. If none of these are in
 %% the payload, the resource of the from jid will be interpreted as device ID.
 %% If both device ID and node list are given, the device_id will be ignored and
@@ -315,18 +331,42 @@ register_client(#jid{luser = LUser,
 
 -spec(unregister_client/3 ::
 (
-    jid(),
+    Jid :: jid(),
     DeviceId :: binary(),
     NodeIds :: [binary()])
     -> error | {error, xmlelement()} | {unregistered, ok} |
        {unregistered, [binary()]}
 ).
 
-unregister_client(#jid{lresource = <<"">>}, undefined, []) ->
+unregister_client(Jid, DeviceId, NodeIds) ->
+    unregister_client(Jid, DeviceId, '_', NodeIds).
+
+%-------------------------------------------------------------------------
+
+-spec(unregister_client/4 ::
+(
+    jid(),
+    DeviceId :: binary(),
+    Timestamp :: erlang:timestamp(),
+    NodeIds :: [binary()])
+    -> error | {error, xmlelement()} | {unregistered, ok} |
+       {unregistered, [binary()]}
+).
+
+unregister_client(#jid{lresource = <<"">>}, undefined, _Timestamp, []) ->
     error;
 
-unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
-                  DeviceId, NodeIds) ->
+unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} = User,
+                  DeviceId, Timestamp, NodeIds) ->
+    Disable = fun(Node, BackendId) ->
+        MatchHeadBackend =
+        #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
+        case mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]) of
+            [] -> ?DEBUG("++++ Backend does not exist!", []);
+            [PubsubHost] ->
+                disable(User, ljid_to_jid({<<"">>, PubsubHost, <<"">>}), Node, true)
+        end
+    end,
     F = fun() ->
         case NodeIds of
             [] ->
@@ -335,26 +375,29 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                     <<"">> -> LResource;
                     _ -> DeviceId
                 end,
+                MatchHead =
+                #push_registration{id = {{LUser, LServer}, ChosenDeviceId},
+                                   timestamp = Timestamp, _='_'},
                 MatchingReg =
-                mnesia:read({push_registration,
-                             {{LUser, LServer}, ChosenDeviceId}}),
+                mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
                 case MatchingReg of
                     [] -> error;
 
-                    [#push_registration{node = NodeId}] ->
+                    [#push_registration{node = Node, backend_id = BackendId}] ->
                         ?DEBUG("deleting registration of user ~p whith device_id "
                                "~p",
                                [jlib:jid_to_string({LUser, LServer, <<"">>}),
-                                NodeId]),
+                                Node]),
                         mnesia:delete({push_registration,
                                        {{LUser, LServer}, ChosenDeviceId}}),
+                        Disable(Node, BackendId),
                         ok
                 end;
 
             GivenNodes ->
                 MatchHead = #push_registration{id = {{LUser, LServer}, '_'},
                                                node = '$1',
-                                               _='_'},
+                                               timestamp = Timestamp, _='_'},
                 SelectedRegs =
                 mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
                 MatchingRegs =
@@ -365,8 +408,10 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                     _ ->
                         lists:foldl(
                              fun(#push_registration{id = Id,
-                                                    node = Node}, Acc) ->
+                                                    node = Node,
+                                                    backend_id = BackendId}, Acc) ->
                                    mnesia:delete({push_registration, Id}),
+                                   Disable(Node, BackendId),
                                    [Node|Acc]
                              end,
                              [],
@@ -539,6 +584,7 @@ disable(#jid{luser = LUser, lserver = LServer},
                 case MatchingSubscrs of
                     [] -> error;
                     _ ->
+                        ?DEBUG("+++++ Disabling subscriptions for user ~p@~p", [LUser, LServer]),
                         case StopSessions of
                             false -> ok;
                             true ->
@@ -576,41 +622,6 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
         {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
         {atomic, RegList} -> {registrations, RegList}
     end.
-
-%-------------------------------------------------------------------------
-
--spec(delete_registration/2 ::
-(
-    BJid :: bare_jid(),
-    Timestamp :: erlang:timestamp())
-    -> any()
-).
-
-delete_registration({LUser, LServer} = BJid, Timestamp) ->
-    F = fun() ->
-        MatchHeadReg =
-        #push_registration{id = {BJid, '$1'}, timestamp = Timestamp,
-                           node = '$2', backend_id = '$3'},
-        SelectedReg =
-        mnesia:select(push_registration,
-                      [{MatchHeadReg, [], ['$1', '$2', '$3']}]),
-        case SelectedReg of
-            [] -> ok;
-            [{DeviceId, Node, BackendId}] ->
-                Jid = ljid_to_jid({LUser, LServer, <<"">>}),
-                MatchHeadBackend =
-                #push_backend{id = BackendId, pubsub_host = '$1'},
-                SelectedBackend =
-                mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]),
-                case SelectedBackend of
-                    [] -> ?DEBUG("+++++ Backend does not exist", []);
-                    [PubsubHost] ->
-                        unregister_client(Jid, DeviceId, []),
-                        disable(Jid, {<<"">>, PubsubHost, <<"">>}, Node, true)
-                end
-        end
-    end,
-    mnesia:transaction(F).
 
 %-------------------------------------------------------------------------
 
@@ -922,7 +933,8 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                 lists:for_each(ProcessReg, Registrations)
         end
     end,
-    mnesia:transaction(F);
+    mnesia:transaction(F),
+    ok;
            
 incoming_notification(_NodeId, _Payload) ->
     error.    
