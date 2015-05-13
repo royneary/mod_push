@@ -140,10 +140,11 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
         none ->
             node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
                                        ItemId, Payload);
-
         ok -> {result, ok};
-
-        _ -> {error, ?ERR_NOT_AUTHORIZED}
+        bad_request -> {error, ?ERR_BAD_REQUEST};
+        node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
+        not_authorized -> {error, ?ERR_FORBIDDEN};
+        internal_server_error -> {error, ?ERR_INTERNAL_SERVER_ERROR}
     end.
     
 remove_extra_items(Nidx, MaxItems, ItemIds) ->

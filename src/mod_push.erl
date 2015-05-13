@@ -260,7 +260,7 @@ register_client(#jid{luser = LUser,
             %% FIXME: there might be type = apns, but app_name chatninja1 AND 
             %% chatninja2!
             [#push_backend{id = BackendId, pubsub_host = PubsubHost}|_] ->
-                ?DEBUG("register_client: found backend", []),
+                ?DEBUG("+++++ register_client: found backend", []),
                 ChosenDeviceId = case DeviceId of
                     undefined -> LResource;
                     <<"">> -> LResource;
@@ -296,7 +296,7 @@ register_client(#jid{luser = LUser,
                  Registration#push_registration.secret};
             
             _ ->
-                ?DEBUG("register_client: found no backend", []),
+                ?DEBUG("+++++ register_client: found no backend", []),
                 error
         end
     end,
@@ -358,14 +358,24 @@ unregister_client(#jid{lresource = <<"">>}, undefined, _Timestamp, []) ->
 
 unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} = User,
                   DeviceId, Timestamp, NodeIds) ->
-    Disable = fun(Node, BackendId) ->
-        MatchHeadBackend =
-        #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
-        case mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]) of
-            [] -> ?DEBUG("++++ Backend does not exist!", []);
-            [PubsubHost] ->
-                disable(User, ljid_to_jid({<<"">>, PubsubHost, <<"">>}), Node, true)
-        end
+    DisableIfLocal =
+    case is_local_domain(LServer) of
+        false ->
+            %% FIXME: can we send an affiliation removal notification?
+            fun(_, _) -> ok end;
+        true ->
+            fun(Node, BackendId) ->
+                MatchHeadBackend =
+                #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
+                Selected =
+                mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]),
+                case Selected of
+                    [] -> ?DEBUG("++++ Backend does not exist!", []);
+                    [PubsubHost] ->
+                        disable(User, ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
+                                Node, true)
+                end
+            end
     end,
     F = fun() ->
         case NodeIds of
@@ -384,13 +394,13 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
                     [] -> error;
 
                     [#push_registration{node = Node, backend_id = BackendId}] ->
-                        ?DEBUG("deleting registration of user ~p whith device_id "
+                        ?DEBUG("+++++ deleting registration of user ~p whith device_id "
                                "~p",
                                [jlib:jid_to_string({LUser, LServer, <<"">>}),
-                                Node]),
+                                ChosenDeviceId]),
                         mnesia:delete({push_registration,
                                        {{LUser, LServer}, ChosenDeviceId}}),
-                        Disable(Node, BackendId),
+                        DisableIfLocal(Node, BackendId),
                         ok
                 end;
 
@@ -411,7 +421,7 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
                                                     node = Node,
                                                     backend_id = BackendId}, Acc) ->
                                    mnesia:delete({push_registration, Id}),
-                                   Disable(Node, BackendId),
+                                   DisableIfLocal(Node, BackendId),
                                    [Node|Acc]
                              end,
                              [],
@@ -446,7 +456,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
        #jid{lserver = PubsubHost} = BackendJid, Node, XDataForms) ->
     ParsedSecret =
     parse_form(XDataForms, ?NS_PUBLISH_OPTIONS, [], [{single, <<"secret">>}]),
-    ?DEBUG("ParsedSecret = ~p", [ParsedSecret]),
+    ?DEBUG("+++++ ParsedSecret = ~p", [ParsedSecret]),
     Secret = case ParsedSecret of
         not_found -> undefined; 
         error -> error;
@@ -554,7 +564,7 @@ disable(#jid{luser = LUser, lserver = LServer},
                         %% FIXME: replace by P ! stop
                         P ! kick; 
                     _ ->
-                        ?DEBUG("Didn't find PID for ~p@~p/~p",
+                        ?DEBUG("++++ Didn't find PID for ~p@~p/~p",
                                [LUser, LServer, Subscription#subscription.resource])
                 end
         end
@@ -733,12 +743,12 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
         false ->
             case AllowRelay of
                 false ->
-                    ?DEBUG("Worker ~p is not running, cancel dispatching "
+                    ?DEBUG("+++++ Worker ~p is not running, cancel dispatching "
                            "push notification", [Worker]);
                 true ->
                     Index = random:uniform(length(ClusterNodes)),
                     ChosenNode = lists:nth(Index, ClusterNodes),
-                    ?DEBUG("Relaying push notification to node ~p",
+                    ?DEBUG("+++++ Relaying push notification to node ~p",
                            [ChosenNode]),
                     gen_server:cast(
                         {Worker, ChosenNode},
@@ -914,9 +924,11 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                         Payload = make_payload(PayloadRecord),
                         dispatch_local(Payload, Token, AppId, BackendId, Silent,
                                        RegId, Timestamp, false); 
-                     _ -> ?INFO_MSG("Cancel dispatching push notification: "
-                                    "item published on node ~p contains "
-                                    "malformed data form", [NodeId])
+                     _ ->
+                        ?INFO_MSG("Cancel dispatching push notification: "
+                                  "item published on node ~p contains "
+                                  "malformed data form", [NodeId]),
+                        bad_request
                 end
         end
     end,
@@ -924,18 +936,19 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
         MatchHeadReg = #push_registration{node = NodeId, _ = '_'},
         case mnesia:select(push_registration, [{MatchHeadReg, [], ['$_']}]) of
             [] ->
-                %% this should never happen
-                ?DEBUG("received push notification for non-existing registration "
-                       "on node ~p", [NodeId]),
-                error;
+                ?INFO_MSG("received push notification for non-existing node ~p",
+                          [NodeId]),
+                node_not_found;
 
             Registrations ->
                 lists:for_each(ProcessReg, Registrations)
         end
     end,
-    mnesia:transaction(F),
-    ok;
-           
+    case mnesia:transaction(F) of
+        {atomic, Result} -> Result;
+        {aborted, _} -> internal_server_error
+    end;
+
 incoming_notification(_NodeId, _Payload) ->
     error.    
 
@@ -977,7 +990,6 @@ add_backends(Host, Opts) ->
                             lists:merge(Nodes, B#push_backend.cluster_nodes),
                             B#push_backend{cluster_nodes = NewNodes}
                     end,
-                    ?DEBUG("######### writing to push_backend: ~p", [B]),
                     mnesia:write(NewBackend)
                 end,
                 Parsed),
@@ -1018,10 +1030,12 @@ add_disco_hooks(ServerHost) ->
             [#push_backend{register_host = RegHost,
                            pubsub_host = PubsubHost}] =
             mnesia:read({push_backend, K}),
-            ?DEBUG("Found push backend, register_host = ~p, pubsub_host = ~p",
-                   [RegHost, PubsubHost]),
-            register_new_route(RegHost),
-            ?DEBUG("adding to hook adhoc_local_commands, host = ~p", [RegHost]),
+            case is_local_domain(RegHost) of
+                false ->
+                    ?DEBUG("Registering new route: ~p", [RegHost]),
+                    ejabberd_router:register_route(RegHost);
+                true -> ok
+            end,
             ejabberd_hooks:add(adhoc_local_commands,
                                RegHost,
                                ?MODULE,
@@ -1036,22 +1050,6 @@ add_disco_hooks(ServerHost) ->
                                on_disco_reg_identity, 50)
         end,
         BackendKeys).
-
-%-------------------------------------------------------------------------
-
--spec(register_new_route/1 ::
-(
-    HostName :: binary())
-    -> any()
-).
-
-register_new_route(HostName) ->
-    case lists:member(HostName, ejabberd_router:dirty_get_all_domains()) of
-        false ->
-            ?DEBUG("Registering new route: ~p", [HostName]),
-            ejabberd_router:register_route(HostName);
-        true -> ok
-    end.
 
 %-------------------------------------------------------------------------
 
@@ -1093,7 +1091,6 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                       #adhoc_request{node = Command,
                                      action = <<"execute">>,
                                      xdata = XData} = Request) ->
-    ?DEBUG("++++++++++ process_adhoc_command", []),
     Result = case Command of
         %<<"register-push-apns">> ->
 
@@ -1218,7 +1215,6 @@ process_adhoc_command(Acc, _From, _To, _Request) ->
 ).
 
 process_iq(From, _To, #iq{type = Type, sub_el = SubEl} = IQ) ->
-    ?DEBUG("++++++++++++++++++ in process_iq", []),
     JidB = proplists:get_value(<<"jid">>, SubEl#xmlel.attrs),
     Node = proplists:get_value(<<"node">>, SubEl#xmlel.attrs),
     case JidB of
@@ -1258,7 +1254,7 @@ process_iq(From, _To, #iq{type = Type, sub_el = SubEl} = IQ) ->
                             end;
 
                         _ ->
-                            ?DEBUG("Received Invalid push iq from ~p",
+                            ?DEBUG("+++++ Received Invalid push iq from ~p",
                                    [jlib:jid_to_string(From)]),
                             IQ#iq{type = error,
                                   sub_el = [?ERR_NOT_ALLOWED, SubEl]}
@@ -1307,11 +1303,9 @@ on_disco_pubsub_info(Acc, _ServerHost, mod_pubsub, <<"">>, <<"">>) ->
     PushFeature = #xmlel{name = <<"feature">>,
                          attrs = [{<<"var">>, ?NS_PUSH}],
                          children = []},
-    ?DEBUG("on_disco_pubsub_info, returning ~p", [[PushIdentity, PushFeature | Acc]]),
     [PushIdentity, PushFeature | Acc];
 
 on_disco_pubsub_info(Acc, _, _, _, _) ->
-    ?DEBUG("on_disco_pubsub_info, returning Acc", []),
     Acc.
 
 %%-------------------------------------------------------------------------
@@ -1351,7 +1345,6 @@ on_disco_pubsub_info(Acc, _, _, _, _) ->
 ).
 
 on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
-    ?DEBUG("on_disco_reg_identitiy, RegHost = ~p", [RegHost]),
     F = fun() ->
         MatchHead =
         #push_backend{register_host = RegHost, app_name = '$1', _='_'},
@@ -1359,7 +1352,6 @@ on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
     end,
     case mnesia:transaction(F) of
         {atomic, AppNames} ->
-            ?DEBUG("+++++++++ AppNames: ~p", [AppNames]),
             Identities =
             lists:map(
                 fun(A) ->
@@ -1373,17 +1365,13 @@ on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
                            children = []}
                 end,
                 AppNames),
-            ?DEBUG("######## on_disco_reg_identity, returning ~p",
-                   [Identities ++ Acc]),
             Identities ++ Acc;
 
         _ ->
-            ?DEBUG("######## on_disco_reg_identity, returning ~p", [Acc]),
             Acc
     end;
 
 on_disco_reg_identity(Acc, _From, _To, _Node, _Lang) ->
-    ?DEBUG("+++++++++ on_disco_reg_identity, returning ~p", [Acc]),
     Acc.
                
 % FIXME: hook disco_sm_info is not implemented yet!
@@ -1438,7 +1426,6 @@ start(Host, Opts) ->
                         [{disc_only_copies, [node()]},
                          {type, bag},
                          {attributes, record_info(fields, push_stored_packet)}]),
-    ?DEBUG("+++++++++++ Created mnesia tables", []),
     UserFields = record_info(fields, push_user),
     RegFields = record_info(fields, push_registration),
     case mnesia:table_info(push_user, attributes) of
@@ -1656,8 +1643,8 @@ make_config(XDataForms,
                                 [DefIncSenders, DefIncMsgCount,
                                  DefIncSubscrCount, DefIncMsgBodies],
                                 ParsedTupleList)),
-                        ?DEBUG("ChangedOptsFields = ~p", [ChangedOptsFields]),
-                        ?DEBUG("Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
+                        ?DEBUG("+++++ ChangedOptsFields = ~p", [ChangedOptsFields]),
+                        ?DEBUG("+++++ Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
                         ResponseForm = case ChangedOptsFields of
                             [] -> [];
                             _ ->
@@ -1896,6 +1883,13 @@ get_certfile(Opts) ->
 
 %-------------------------------------------------------------------------
 
+-spec(is_local_domain/1 :: (Hostname :: binary()) -> boolean()).
+
+is_local_domain(Hostname) ->
+    lists:member(Hostname, ejabberd_router:dirty_get_all_domains()).
+
+%-------------------------------------------------------------------------
+
 vvaluel(Val) ->
     case Val of
         <<>> -> [];
@@ -2107,5 +2101,4 @@ combine_to_atom(Atom1, Atom2, Term) ->
 ljid_to_jid({LUser, LServer, LResource}) ->
     #jid{user = LUser, server = LServer, resource = LResource,
          luser = LUser, lserver = LServer, lresource = LResource}.
-
 
