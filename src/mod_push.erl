@@ -160,13 +160,6 @@
         {auth_key = <<"">> :: binary(),
          certfile = <<"">> :: binary()}).
 
--record(payload_record,
-        {message_count :: integer(),
-         last_message_sender :: jid(),
-         last_message_body :: binary(),
-         pending_subscription_count :: integer(),
-         last_subscription_sender :: jid()}).
-
 -record(subscription, {resource :: binary(),
                        pending = false :: boolean(),
                        node :: binary(),
@@ -177,7 +170,7 @@
 -record(push_user, {bare_jid :: bare_jid(),
                     subscriptions :: [subscription()],
                     config :: user_config(),
-                    payload :: payload_record()}).
+                    payload = [] :: payload()}).
 
 %% mnesia table
 -record(push_registration, {id :: {bare_jid(), device_id()},
@@ -210,11 +203,11 @@
 -type backend_type() :: apns | gcm | ubuntu | wns.
 -type bare_jid() :: {binary(), binary()}.
 -type device_id() :: binary().
--type notification_payload() :: [{payload_key(), binary()|integer()}].
 -type payload_key() ::
     last_message_sender | last_subscription_sender | message_count |
     pending_subscription_count | last_message_body.
--type payload_record() :: #payload_record{}.
+-type payload_value() :: binary() | integer().
+-type payload() :: [{payload_key(), payload_value()}].
 -type push_backend() :: #push_backend{}.
 -type push_registration() :: #push_registration{}.
 -type reg_type() :: {local_reg, binary()} | % pubsub host
@@ -359,23 +352,48 @@ unregister_client(#jid{lresource = <<"">>}, undefined, _Timestamp, []) ->
 unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} = User,
                   DeviceId, Timestamp, NodeIds) ->
     DisableIfLocal =
-    case is_local_domain(LServer) of
-        false ->
-            %% FIXME: can we send an affiliation removal notification?
-            fun(_, _) -> ok end;
-        true ->
-            fun(Node, BackendId) ->
-                MatchHeadBackend =
-                #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
-                Selected =
-                mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]),
-                case Selected of
-                    [] -> ?DEBUG("++++ Backend does not exist!", []);
-                    [PubsubHost] ->
+    fun(Node, BackendId) ->
+        MatchHeadBackend =
+        #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
+        Selected =
+        mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]),
+        case Selected of
+            [] -> ?DEBUG("++++ Backend does not exist!", []);
+            [PubsubHost] ->
+                case is_local_domain(LServer) of
+                    false ->
+                        BUser =
+                        jlib:jid_remove_resource(User),
+                        PubsubNotification =
+                        #xmlel{
+                            name = <<"pubsub">>,
+                            attrs = [{<<"xmlns">>, ?NS_PUBSUB}],
+                            children =
+                            [#xmlel{
+                                name = <<"affiliations">>,
+                                attrs = [{<<"node">>, Node}],
+                                children =
+                                [#xmlel{
+                                    name = <<"affiliation">>,
+                                    attrs = [{<<"jid">>,
+                                              jlib:jid_to_string(BUser)},
+                                             {<<"affiliation">>,
+                                              <<"none">>}]}]}]},
+                        PubsubMessage =
+                        #xmlel{
+                           name = <<"message">>,
+                           attrs = [],
+                           children = [PubsubNotification]},
+                        ejabberd_router:route(
+                             ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
+                             BUser,
+                             PubsubMessage);
+
+                    true ->
                         disable(User, ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
                                 Node, true)
                 end
-            end
+        end
     end,
     F = fun() ->
         case NodeIds of
@@ -483,11 +501,11 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                         case make_config(XDataForms, GConfig, disable_only) of
                             error -> error;
                             {Config, ResponseForm} ->
+                                %% NewUser will have empty payload
                                 NewUser =
                                 #push_user{bare_jid = {LUser, LServer},
                                            subscriptions = [Subscr],
-                                           config = Config,
-                                           payload = #payload_record{}},
+                                           config = Config},
                                 mnesia:write(NewUser),
                                 ResponseForm
                         end;
@@ -506,11 +524,11 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                                 end,
                                 NewSubscriptions =
                                 [Subscr|lists:filter(FilterNode, Subscriptions)],
+                                %% NewUser will have empty payload
                                 NewUser =
                                 #push_user{bare_jid = {LUser, LServer},
                                            subscriptions = NewSubscriptions,
-                                           config = Config,
-                                           payload = #payload_record{}},
+                                           config = Config},
                                 mnesia:write(NewUser),
                                 ResponseForm
                         end
@@ -552,6 +570,38 @@ disable(_From, _BackendJid, <<"">>, _StopSessions) ->
 
 disable(#jid{luser = LUser, lserver = LServer},
         #jid{lserver = PubsubHost} = BackendJid, Node, StopSessions) ->
+    SubscrPred =
+    fun
+        (#subscription{node = N, reg_type = RegT}) ->
+            NodeMatching =
+            (Node =:= undefined) or (Node =:= N),
+            RegTypeMatching =
+            case RegT of
+                {local_reg, P} -> P =:= PubsubHost;
+                {remote_reg, J, _} ->
+                    (J#jid.luser =:= BackendJid#jid.luser) and
+                    (J#jid.lserver =:= BackendJid#jid.lserver) and
+                    (J#jid.lresource =:= BackendJid#jid.lresource)
+            end,
+            NodeMatching and RegTypeMatching
+    end,
+    case delete_subscriptions({LUser, LServer}, SubscrPred, StopSessions) of
+        {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
+        {atomic, error} -> {error, ?ERR_ITEM_NOT_FOUND};
+        {atomic, ok} -> {disabled, ok}
+    end.
+       
+%-------------------------------------------------------------------------
+
+-spec(delete_subscriptions/3 ::
+(
+    BareJid :: bare_jid(),
+    SubscriptionPred :: fun((subscription()) -> boolean()),
+    StopSessions :: boolean())
+    -> {aborted, any()} | {atomic, error} | {atomic, ok}
+).
+
+delete_subscriptions({LUser, LServer}, SubscriptionPred, StopSessions) ->
     MaybeStopSession = fun(Subscription) ->
         case Subscription#subscription.pending of
             false -> ok;
@@ -573,28 +623,12 @@ disable(#jid{luser = LUser, lserver = LServer},
         case mnesia:read({push_user, {LUser, LServer}}) of
             [] -> error;
             [#push_user{subscriptions = Subscriptions} = User] ->
-                SubscriptionPred =
-                fun
-                    (NodePred, #subscription{node = N, reg_type = RegT}) ->
-                        NodeMatching =
-                        (NodePred =:= undefined) or (NodePred =:= N),
-                        RegTypeMatching =
-                        case RegT of
-                            {local_reg, P} -> P =:= PubsubHost;
-                            {remote_reg, J, _} ->
-                                (J#jid.luser =:= BackendJid#jid.luser) and
-                                (J#jid.lserver =:= BackendJid#jid.lserver) and
-                                (J#jid.lresource =:= BackendJid#jid.lresource)
-                        end,
-                        NodeMatching and RegTypeMatching
-                end,
                 {MatchingSubscrs, NotMatchingSubscrs} =
-                lists:partition(fun(S) -> SubscriptionPred(Node, S) end,
-                                Subscriptions),
+                lists:partition(SubscriptionPred, Subscriptions),
                 case MatchingSubscrs of
                     [] -> error;
                     _ ->
-                        ?DEBUG("+++++ Disabling subscriptions for user ~p@~p", [LUser, LServer]),
+                        ?DEBUG("+++++ Deleting subscriptions for user ~p@~p", [LUser, LServer]),
                         case StopSessions of
                             false -> ok;
                             true ->
@@ -611,12 +645,8 @@ disable(#jid{luser = LUser, lserver = LServer},
                 end
         end
     end,
-    case mnesia:transaction(F) of
-        {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
-        {atomic, error} -> {error, ?ERR_ITEM_NOT_FOUND};
-        {atomic, ok} -> {disabled, ok}
-    end.
-               
+    mnesia:transaction(F).
+
 %-------------------------------------------------------------------------
 
 -spec(list_registrations/1 ::
@@ -668,11 +698,10 @@ on_store_stanza(From,
             [#push_user{subscriptions = Subscriptions,
                         config = Config,
                         payload = StoredPayload} = User] ->
-                case make_payload_record(From, Stanza, StoredPayload) of
-                    empty -> ok;
-                    PayloadRecord ->
-                        mnesia:write(User#push_user{payload = PayloadRecord}),
-                        Payload = make_payload(PayloadRecord, Config),
+                case make_payload(From, Stanza, StoredPayload, Config) of
+                    none -> ok;
+                    Payload ->
+                        mnesia:write(User#push_user{payload = Payload}),
                         StoredPacket =
                         #push_stored_packet{receiver = jlib:jid_tolower(To),
                                             sender = From, packet = Stanza},
@@ -717,7 +746,7 @@ on_store_stanza(From,
 
 -spec(dispatch_local/8 ::
 (
-    Payload :: notification_payload(),
+    Payload :: payload(),
     Token :: binary(),
     AppId :: binary(),
     BackendId :: integer(),
@@ -764,7 +793,7 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
     User :: jid(),
     PubsubHost :: jid(),
     NodeId :: binary(),
-    Payload :: notification_payload(),
+    Payload :: payload(),
     _Secret :: binary())
     -> any()
 ).
@@ -803,16 +832,26 @@ dispatch_remote(User, PubsubHost, NodeId, Payload, _Secret) ->
     -> any()
 ).
 
-on_user_available(#jid{lserver = LServer} = Jid) ->
+on_user_available(Jid) ->
+    %% we call delete_subscriptions because there might be subscriptions left
+    %% for the newly available client. This happens when a client leaves in the
+    %% wait_for_resumption state but does not try to resume when returning.
+    SubscrPred =
+    fun(#subscription{resource = LResource}) ->
+        LResource =:= Jid#jid.lresource
+    end,
+    delete_subscriptions({Jid#jid.luser, Jid#jid.lserver}, SubscrPred, false),
     F = fun() ->
         JidL = jlib:jid_tolower(Jid),
         case mnesia:read({push_stored_packet, JidL}) of
             [] -> ok;
             Packets ->
+                ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(Jid)]),
                 lists:foreach(
                     fun(#push_stored_packet{sender = From, timestamp = T,
                                             packet = P}) ->
-                        StampedPacket = jlib:add_delay_info(P, LServer, T),
+                        StampedPacket =
+                        jlib:add_delay_info(P, Jid#jid.lserver, T),
                         ejabberd_sm ! {route, From, Jid, StampedPacket}
                     end,
                     lists:keysort(#push_stored_packet.timestamp, Packets)),
@@ -861,7 +900,7 @@ on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource})
             [] -> ok;
             [#push_user{subscriptions = Subscrs} = User] ->
                 NewSubscrs = set_pending(LResource, false, Subscrs),
-                mnesia:write(User#push_user{payload = #payload_record{},
+                mnesia:write(User#push_user{payload = [],
                                             subscriptions = NewSubscrs}),
                 mnesia:delete({push_stored_packet, jlib:jid_tolower(User)}) 
         end
@@ -891,7 +930,7 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                            backend_id = BackendId,
                            silent_push = Silent,
                            timestamp = Timestamp}) ->
-        % TODO: check secret (here or on node_push?)
+        % TODO: check secret
         case get_xdata_elements(Children) of
            [] ->
                dispatch_local([], Token, AppId, BackendId, Silent, RegId,
@@ -914,14 +953,22 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                     {result,
                      [MsgCount, MsgSender, MsgBody, SubscrCount,
                       SubscrSender]} ->
-                        PayloadRecord =
-                        #payload_record{
-                            message_count = MsgCount,
-                            last_message_sender = MsgSender,
-                            last_message_body = MsgBody,
-                            pending_subscription_count = SubscrCount,
-                            last_subscription_sender = SubscrSender},
-                        Payload = make_payload(PayloadRecord),
+                        Payload =
+                        lists:foldl(
+                            fun({Key, Value}, Acc) ->
+                                case Value of
+                                    undefined -> Acc;
+                                    _ -> [{Key, Value}|Acc]
+                                end
+                            end,
+                            [],
+                            [{message_count, MsgCount},
+                             {last_message_sender,
+                              jlib:jid_to_string(MsgSender)},
+                             {last_message_body, MsgBody},
+                             {pending_subscription_count, SubscrCount},
+                             {last_subscription_sender,
+                              jlib:jid_to_string(SubscrSender)}]),
                         dispatch_local(Payload, Token, AppId, BackendId, Silent,
                                        RegId, Timestamp, false); 
                      _ ->
@@ -947,10 +994,7 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
     case mnesia:transaction(F) of
         {atomic, Result} -> Result;
         {aborted, _} -> internal_server_error
-    end;
-
-incoming_notification(_NodeId, _Payload) ->
-    error.    
+    end.
 
 %-------------------------------------------------------------------------
 
@@ -1452,6 +1496,8 @@ start(Host, Opts) ->
                        on_wait_for_resume, 50),
     ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
                        on_disco_sm_features, 50),
+    %ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
+    %                   on_affiliation_removal, 50),
     % FIXME: disco_sm_info is not implemented in mod_disco!
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
@@ -1736,15 +1782,25 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
 
 %-------------------------------------------------------------------------
 
--spec(make_payload_record/3 ::
+-spec(make_payload/4 ::
 (
     From :: jid(),
     Stanza :: xmlelement(),
-    OldRecord :: payload_record())
-    -> payload_record() | empty
+    OldPayload :: payload(),
+    Config :: user_config())
+    -> payload()
 ).
 
-make_payload_record(From, Stanza, OldRecord) ->
+make_payload(From, Stanza, OldPayload,
+             #user_config{include_senders = IncSenders,
+                          include_message_count = IncMsgCount,
+                          include_subscription_count = IncSubscrCount,
+                          include_message_bodies = IncMsgBodies}) ->
+    FromS = jlib:jid_to_string(From),
+    KeyStore =
+    fun ({true, Key, Value}, Acc) -> lists:keystore(Key, 1, Acc, {Key, Value});
+        ({false, _, _}, Acc) -> Acc
+    end,
     case Stanza of
         #xmlel{name = <<"message">>, children = Children} ->
             %% FIXME: Do we want to send push notifications on every message type?
@@ -1758,94 +1814,37 @@ make_payload_record(From, Stanza, OldRecord) ->
                 [] -> <<"">>;
                 [#xmlel{children = [{xmlcdata, CData}]}|_] -> CData
             end,
-            MsgCount = case OldRecord#payload_record.message_count of
+            OldMsgCount = proplists:get_value(message_count, OldPayload, 0),
+            MsgCount = case OldMsgCount of
                 ?MAX_INT -> 0; 
-                OldMsgCount when is_integer(OldMsgCount) -> OldMsgCount + 1;
-                _ -> 1
+                C when is_integer(C) -> C + 1
             end,
-            OldRecord#payload_record{
-                message_count = MsgCount,
-                last_message_sender = From,
-                last_message_body = MsgBody};
-         
-        #xmlel{name = <<"presence">>, attrs = Attrs} -> 
+            lists:foldl(KeyStore, OldPayload,
+                        [{IncMsgCount, message_count, MsgCount},
+                         {IncSenders, last_message_sender, FromS},
+                         {IncMsgBodies, last_message_body, MsgBody}]);
+           
+       #xmlel{name = <<"presence">>, attrs = Attrs} -> 
             case proplists:get_value(<<"type">>, Attrs) of
                 <<"subscribe">> ->
+                    OldSubscrCount =
+                    proplists:get_value(pending_subscription_count, OldPayload,
+                                        0),
                     SubscrCount =
-                    case OldRecord#payload_record.pending_subscription_count of
+                    case OldSubscrCount of
                         ?MAX_INT -> 0;
-                        OldSubscrCount when is_integer(OldSubscrCount) ->
-                            OldSubscrCount + 1;
-                        _ -> 1
+                        C when is_integer(C) -> C + 1
                     end,
-                    OldRecord#payload_record{
-                        pending_subscription_count = SubscrCount,
-                        last_subscription_sender = From};
-
-                _ -> OldRecord
+                    lists:foldl(KeyStore, OldPayload,
+                                [{IncSubscrCount, pending_subscription_count,
+                                  SubscrCount},
+                                 {IncSenders, last_subscription_sender, FromS}]);
+                
+                _ -> OldPayload
             end;
 
-        _ -> empty
+        _ -> none
     end.
-
-%-------------------------------------------------------------------------
-
--spec(make_payload/1 ::
-(
-    Payload :: payload_record())
-    -> [{atom(), binary()|integer()}]
-).
-
-make_payload(PayloadRecord) ->
-    IncludeAllConfig =
-    #user_config{include_senders = true,
-                 include_message_count = true,
-                 include_subscription_count = true,
-                 include_message_bodies = true},
-    make_payload(PayloadRecord, IncludeAllConfig).
-
-%-------------------------------------------------------------------------
-
--spec(make_payload/2 ::
-(
-    Payload :: payload_record(),
-    Config :: user_config())
-    -> [{atom(), binary()|integer()}]
-).
-
-make_payload(#payload_record{message_count = MsgCount,
-                             last_message_sender = MsgSender,
-                             last_message_body = MsgBody,
-                             pending_subscription_count = SubscrCount,
-                             last_subscription_sender = SubscrSender},
-             #user_config{include_senders = IncSenders,
-                          include_message_count = IncMsgCount,
-                          include_subscription_count = IncSubscrCount,
-                          include_message_bodies = IncMsgBodies}) ->
-    IncludeIfOption =
-    fun
-        F({Option, [{K, V}|T]}, AccIn) ->
-            AccOut = case Option of
-                false -> AccIn;
-                true ->
-                    case V of
-                       undefined -> AccIn;
-                       #jid{} -> [{K, jlib:jid_to_string(V)}|AccIn];
-                       _ -> [{K, V}|AccIn]
-                    end
-            end,
-            F({Option, T}, AccOut); 
-
-        F({_, []}, AccIn) -> AccIn
-    end,
-    lists:foldl(
-        IncludeIfOption,
-        [],
-        [{IncSenders, [{last_message_sender, MsgSender},
-                       {last_subscription_sender, SubscrSender}]},
-         {IncMsgCount, [{message_count, MsgCount}]},
-         {IncSubscrCount, [{pending_subscription_count, SubscrCount}]},
-         {IncMsgBodies, [{last_message_body, MsgBody}]}]).
 
 %-------------------------------------------------------------------------
 
