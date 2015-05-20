@@ -75,6 +75,7 @@
          process_iq/3,
          on_store_stanza/3,
          incoming_notification/2,
+         on_affiliation_removal/4,
          on_user_available/1,
          on_resume_session/1,
          on_wait_for_resume/2,
@@ -679,18 +680,18 @@ on_store_stanza(From,
                 Stanza) ->
     ?DEBUG("++++++++++++ Stored Stanza for ~p",
            [jlib:jid_to_string({LUser, LServer, LResource})]),
-    PreferFullJid = fun(Subscriptions) ->
-        MatchingFullJid =
-        lists:filter(
-            fun (S) when S#subscription.resource =:= LResource -> true;
-                (_) -> false
-            end,
-            Subscriptions),
-        case MatchingFullJid of
-            [] -> Subscriptions;
-            [Matching] -> [Matching]
-        end
-    end,
+    %PreferFullJid = fun(Subscriptions) ->
+    %    MatchingFullJid =
+    %    lists:filter(
+    %        fun (S) when S#subscription.resource =:= LResource -> true;
+    %            (_) -> false
+    %        end,
+    %        Subscriptions),
+    %    case MatchingFullJid of
+    %        [] -> Subscriptions;
+    %        [Matching] -> [Matching]
+    %    end
+    %end,
     F = fun() ->
         MatchHeadUser = #push_user{bare_jid = {LUser, LServer}, _='_'},
         case mnesia:select(push_user, [{MatchHeadUser, [], ['$_']}]) of
@@ -736,7 +737,14 @@ on_store_stanza(From,
                             dispatch_remote(To, PubsubHost, NodeId, Payload, Secret),
                             mnesia:write(StoredPacket)
                         end,
-                        lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
+                        Filtered =
+                        lists:filter(
+                            fun(#subscription{resource = Resource}) ->
+                                Resource =:= LResource
+                            end,
+                            Subscriptions),
+                        lists:foreach(ProcessSubscription, Filtered)
+                        %lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
                 end
         end
     end,
@@ -860,6 +868,70 @@ on_user_available(Jid) ->
     end,
     mnesia:transaction(F).
 
+%-------------------------------------------------------------------------
+
+-spec(on_affiliation_removal/4 ::
+(
+    _User :: jid(),
+    From :: jid(),
+    To :: jid(),
+    Packet :: xmlelement())
+    -> ok
+).
+
+on_affiliation_removal(User, From, _To,
+                       #xmlel{name = <<"message">>, children = Children}) ->
+    FindNodeAffiliations =
+    fun 
+    F([#xmlel{name = <<"pubsub">>, attrs = Attrs, children = PChildr}|T]) ->
+        case proplists:get_value(<<"xmlns">>, Attrs) of
+            ?NS_PUBSUB ->
+                case PChildr of
+                    [#xmlel{name = <<"affiliations">>} = A] ->
+                        case proplists:get_value(<<"node">>, A#xmlel.attrs) of
+                            undefined -> error;
+                            Node -> {Node, A#xmlel.children}
+                        end;
+                    _ -> not_found
+                end;
+            _ -> F(T)
+        end;
+    F([_|T]) -> F(T);
+    F([]) -> not_found
+    end,
+    FindJid =
+    fun
+    F([#xmlel{name = <<"affiliation">>, attrs = Attrs}|T]) ->
+        case proplists:get_value(<<"affiliation">>, Attrs) of
+            <<"none">> ->
+                case proplists:get_value(<<"jid">>, Attrs) of
+                    J when is_binary(J) -> jlib:string_to_jid(J);
+                    _ -> error
+                end;
+            undefined -> F(T)
+        end;
+    F([_|T]) -> F(T);
+    F([]) -> not_found
+    end,
+    ErrMsg =
+    fun() ->
+        ?INFO_MSG("Received invalid affiliation removal notification from ~p",
+                  [jlib:jid_to_string(From)])
+    end,
+    case FindNodeAffiliations(Children) of
+        not_found -> ok;
+        error -> ErrMsg();
+        {Node, Affiliations} ->
+            BareUserJid = jlib:jid_remove_resource(jlib:jid_tolower(User)),
+            case FindJid(Affiliations) of
+                not_found -> ok;
+                BareUserJid -> disable(BareUserJid, From, Node, true);
+                _ -> ErrMsg()
+            end
+    end;
+
+on_affiliation_removal(_Jid, _From, _To, _) -> ok.
+        
 %-------------------------------------------------------------------------
 
 -spec(on_wait_for_resume/2 ::
@@ -1496,8 +1568,8 @@ start(Host, Opts) ->
                        on_wait_for_resume, 50),
     ejabberd_hooks:add(disco_sm_features, Host, ?MODULE,
                        on_disco_sm_features, 50),
-    %ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
-    %                   on_affiliation_removal, 50),
+    ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
+                       on_affiliation_removal, 50),
     % FIXME: disco_sm_info is not implemented in mod_disco!
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
@@ -1840,7 +1912,7 @@ make_payload(From, Stanza, OldPayload,
                                   SubscrCount},
                                  {IncSenders, last_subscription_sender, FromS}]);
                 
-                _ -> OldPayload
+                _ -> none
             end;
 
         _ -> none
