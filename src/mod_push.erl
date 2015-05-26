@@ -73,10 +73,10 @@
 
 -export([start/2, stop/1,
          process_iq/3,
-         on_store_stanza/3,
+         on_store_stanza/4,
          incoming_notification/2,
          on_affiliation_removal/4,
-         on_user_available/1,
+         on_unset_presence/4,
          on_resume_session/1,
          on_wait_for_resume/2,
          on_disco_sm_features/5,
@@ -458,20 +458,20 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
 
 -spec(enable/4 ::
 (
-    From :: jid(),
+    UserJid :: jid(),
     BackendJid :: jid(),
     Node :: binary(),
     XData :: [false | xmlelement()])
     -> {error, xmlelement()} | {enabled, ok} | {enabled, [xmlelement()]}
 ).
 
-enable(_From, _BackendJid, undefined, _XDataForms) ->
+enable(_UserJid, _BackendJid, undefined, _XDataForms) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
-enable(_From, _BackendJid, <<"">>, _XDataForms) ->
+enable(_UserJid, _BackendJid, <<"">>, _XDataForms) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
-enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
+enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
        #jid{lserver = PubsubHost} = BackendJid, Node, XDataForms) ->
     ParsedSecret =
     parse_form(XDataForms, ?NS_PUBLISH_OPTIONS, [], [{single, <<"secret">>}]),
@@ -508,6 +508,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                                            subscriptions = [Subscr],
                                            config = Config},
                                 mnesia:write(NewUser),
+                                resend_packets(UserJid),
                                 ResponseForm
                         end;
                     
@@ -531,6 +532,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                                            subscriptions = NewSubscriptions,
                                            config = Config},
                                 mnesia:write(NewUser),
+                                resend_packets(UserJid),
                                 ResponseForm
                         end
                 end
@@ -666,8 +668,9 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
 
 %-------------------------------------------------------------------------
 
--spec(on_store_stanza/3 ::
+-spec(on_store_stanza/4 ::
 (
+    Acc :: any(),
     From :: jid(),
     To :: jid(),
     Stanza :: xmlelement())
@@ -675,7 +678,8 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
 ).
 
 %% called on hook mgmt_queue_add_hook
-on_store_stanza(From,
+on_store_stanza(RerouteFlag,
+                From,
                 #jid{luser = LUser, lserver = LServer, lresource = LResource} = To,
                 Stanza) ->
     ?DEBUG("++++++++++++ Stored Stanza for ~p",
@@ -708,8 +712,7 @@ on_store_stanza(From,
                                             sender = From, packet = Stanza},
                         ProcessSubscription =
                         fun
-                        (#subscription{node = NodeId,
-                                       reg_type = {local_reg, _}}) ->
+                        (#subscription{node = NodeId, reg_type = {local_reg, _}}, Acc) ->
                             MatchHeadReg =
                             #push_registration{id = {{LUser, LServer}, '_'},
                                                node = NodeId, _='_'},
@@ -717,7 +720,9 @@ on_store_stanza(From,
                             mnesia:select(push_registration,
                                           [{MatchHeadReg, [], ['$_']}]),
                             case SelectedRegs of
-                                [] -> error;
+                                [] ->
+                                    ?DEBUG("+++++++ No registration found for node ~p", [NodeId]),
+                                    Acc;
 
                                 [#push_registration{id = RegId,
                                                     token = Token,
@@ -728,14 +733,16 @@ on_store_stanza(From,
                                     ?DEBUG("++++ on_store_stanza: found registration, dispatch locally", []),
                                     dispatch_local(Payload, Token, AppId, BackendId,
                                                    Silent, RegId, Timestamp, true),
-                                    mnesia:write(StoredPacket)
+                                    mnesia:write(StoredPacket),
+                                    dispatched
                             end;
                            
                         (#subscription{node = NodeId,
-                                       reg_type = {remote_reg, PubsubHost, Secret}}) -> 
+                                       reg_type = {remote_reg, PubsubHost, Secret}}, _Acc) -> 
                             ?DEBUG("++++ on_store_stanza: dispatching remotely", []),
                             dispatch_remote(To, PubsubHost, NodeId, Payload, Secret),
-                            mnesia:write(StoredPacket)
+                            mnesia:write(StoredPacket),
+                            dispatched
                         end,
                         Filtered =
                         lists:filter(
@@ -743,12 +750,22 @@ on_store_stanza(From,
                                 Resource =:= LResource
                             end,
                             Subscriptions),
-                        lists:foreach(ProcessSubscription, Filtered)
+                        lists:foldl(ProcessSubscription, ok, Filtered)
                         %lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
                 end
         end
     end,
-    mnesia:transaction(F).
+    case mnesia:transaction(F) of
+        {aborted, Error} ->
+            ?DEBUG("+++++ error in on_store_stanza: ~p", [Error]),
+            RerouteFlag;
+        {atomic, ok} -> RerouteFlag;
+        {atomic, dispatched} ->
+            case RerouteFlag of
+                true -> false_on_system_shutdown;
+                _ -> RerouteFlag
+            end
+    end.
 
 %-------------------------------------------------------------------------
 
@@ -834,39 +851,39 @@ dispatch_remote(User, PubsubHost, NodeId, Payload, _Secret) ->
 
 %-------------------------------------------------------------------------
 
--spec(on_user_available/1 ::
+-spec(on_unset_presence/4 ::
 (
-    Jid :: jid())
+    User :: binary(),
+    Server :: binary(),
+    Resource :: binary(),
+    Status :: binary())
     -> any()
 ).
 
-on_user_available(Jid) ->
-    %% we call delete_subscriptions because there might be subscriptions left
-    %% for the newly available client. This happens when a client leaves in the
-    %% wait_for_resumption state but does not try to resume when returning.
+on_unset_presence(User, Server, Resource, _Status) ->
     SubscrPred =
-    fun(#subscription{resource = LResource}) ->
-        LResource =:= Jid#jid.lresource
-    end,
-    delete_subscriptions({Jid#jid.luser, Jid#jid.lserver}, SubscrPred, false),
+    fun(#subscription{resource = LResource}) -> LResource =:= Resource end,
+    delete_subscriptions({User, Server}, SubscrPred, false),
     F = fun() ->
-        JidL = jlib:jid_tolower(Jid),
-        case mnesia:read({push_stored_packet, JidL}) of
-            [] -> ok;
-            Packets ->
-                ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(Jid)]),
-                lists:foreach(
-                    fun(#push_stored_packet{sender = From, timestamp = T,
-                                            packet = P}) ->
-                        StampedPacket =
-                        jlib:add_delay_info(P, Jid#jid.lserver, T),
-                        ejabberd_sm ! {route, From, Jid, StampedPacket}
-                    end,
-                    lists:keysort(#push_stored_packet.timestamp, Packets)),
-                mnesia:delete({push_stored_packet, JidL}) 
-        end
+        mnesia:delete({push_stored_packet, {User, Server, Resource}})
     end,
     mnesia:transaction(F).
+
+%-------------------------------------------------------------------------
+
+-spec(resend_packets/1 :: (Jid :: jid()) -> ok).
+
+resend_packets(Jid) ->
+    LJid = jlib:jid_tolower(Jid),
+    Packets = mnesia:read({push_stored_packet, LJid}),
+    ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(LJid)]),
+    lists:foreach(
+        fun(#push_stored_packet{sender = From, timestamp = T, packet = P}) ->
+            StampedPacket = jlib:add_delay_info(P, Jid#jid.lserver, T),
+            ejabberd_sm ! {route, From, Jid, StampedPacket}
+        end,
+        lists:keysort(#push_stored_packet.timestamp, Packets)),
+    mnesia:delete({push_stored_packet, LJid}).
 
 %-------------------------------------------------------------------------
 
@@ -1191,6 +1208,17 @@ start_workers(Host, Module,
      permanent, 1000, worker, [?MODULE]},
     supervisor:start_child(ejabberd_sup, BackendSpec),
     start_workers(Host, Module, T).
+
+%-------------------------------------------------------------------------
+
+-spec(notify_previous_users/1 :: (Host :: binary()) -> ok).
+
+notify_previous_users(Host) ->
+    % TODO: send push notifications to all users in table push_user, then delete them
+    MatchHead = #push_user{bare_jid = {'_', Host}, _='_'},
+    Users = mnesia:select(push_user, [{MatchHead, [], ['$_']}]),
+    lists:foreach(fun mnesia:delete_object/1, Users),
+    ok.
 
 %-------------------------------------------------------------------------
 
@@ -1527,7 +1555,7 @@ start(Host, Opts) ->
     % instances 
     % TODO: disable push subscription when session is deleted
     mnesia:create_table(push_user,
-                        [{ram_copies, [node()]},
+                        [{disc_copies, [node()]},
                          {type, set},
                          {attributes, record_info(fields, push_user)}]),
     mnesia:create_table(push_registration,
@@ -1544,6 +1572,7 @@ start(Host, Opts) ->
                          {attributes, record_info(fields, push_stored_packet)}]),
     UserFields = record_info(fields, push_user),
     RegFields = record_info(fields, push_registration),
+    SPacketFields = record_info(fields, push_stored_packet),
     case mnesia:table_info(push_user, attributes) of
         UserFields -> ok;
         _ -> mnesia:transform_table(push_user, ignore, UserFields)
@@ -1551,6 +1580,10 @@ start(Host, Opts) ->
     case mnesia:table_info(push_registration, attributes) of
         RegFields -> ok;
         _ -> mnesia:transform_table(push_registration, ignore, RegFields)
+    end,
+    case mnesia:table_info(push_stored_packet, attributes) of
+        SPacketFields -> ok;
+        _ -> mnesia:transform_table(push_stored_packet, ignore, SPacketFields)
     end,
     % TODO: check if backends in registrations are still present
     % TODO: send push notifications (event server available) to all push users
@@ -1560,7 +1593,7 @@ start(Host, Opts) ->
                                   process_iq, one_queue),
     ejabberd_hooks:add(mgmt_queue_add_hook, Host, ?MODULE, on_store_stanza,
                        50),
-    ejabberd_hooks:add(user_available_hook, Host, ?MODULE, on_user_available,
+    ejabberd_hooks:add(unset_presence_hook, Host, ?MODULE, on_unset_presence,
                        70),
     ejabberd_hooks:add(mgmt_resume_session_hook, Host, ?MODULE,
                        on_resume_session, 50),
@@ -1574,7 +1607,8 @@ start(Host, Opts) ->
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
         add_backends(Host, Opts),
-        add_disco_hooks(Host)
+        add_disco_hooks(Host),
+        notify_previous_users(Host)
     end,
     case mnesia:transaction(F) of
         {atomic, _} -> ?DEBUG("++++++++ Added push backends", []);
@@ -1592,8 +1626,8 @@ start(Host, Opts) ->
 stop(Host) ->
     gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_PUSH),
     ejabberd_hooks:delete(mgmt_queue_add_hook, Host, ?MODULE,
-                          on_store_stanza, 49),
-    ejabberd_hooks:delete(user_available_hook, Host, ?MODULE, on_user_available,
+                          on_store_stanza, 50),
+    ejabberd_hooks:delete(unset_presence_hook, Host, ?MODULE, on_unset_presence,
                           70),
     ejabberd_hooks:delete(mgmt_resume_session_hook, Host, ?MODULE,
                           on_resume_session, 50),
@@ -1601,6 +1635,8 @@ stop(Host) ->
                           on_wait_for_resume, 50),
     ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
                           on_disco_sm_features, 50),
+    ejabberd_hooks:delete(user_receive_packet, Host, ?MODULE,
+                          on_affiliation_removal, 50),
     % FIXME:
     %ejabberd_hooks:delete(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
