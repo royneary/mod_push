@@ -499,7 +499,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                 case mnesia:read({push_user, {LUser, LServer}}) of
                     [] ->
                         GConfig = get_global_config(LServer),
-                        case make_config(XDataForms, GConfig, disable_only) of
+                        case make_config(XDataForms, GConfig, enable_disable) of
                             error -> error;
                             {Config, ResponseForm} ->
                                 %% NewUser will have empty payload
@@ -1238,7 +1238,19 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
     Result = case Command of
         %<<"register-push-apns">> ->
 
-        %<<"register-push-gcm">> ->
+        <<"register-push-gcm">> ->
+            Parsed = parse_form([XData],
+                                undefined,
+                                [{single, <<"token">>}],
+                                [{single, <<"device-id">>},
+                                 {single, <<"device-name">>}]),
+            case Parsed of
+                {result, [Token, DeviceId, DeviceName]} ->
+                    register_client(From, LServer, gcm, Token, DeviceId,
+                                    DeviceName, <<"">>, undefined);
+
+                _ -> error
+            end;
 
         <<"register-push-ubuntu">> ->
             Parsed = parse_form([XData],
@@ -1838,7 +1850,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
         {#jid{luser = <<"">>, lserver = RegisterHost, lresource = <<"">>},
          #jid{luser = <<"">>, lserver = PubsubHost, lresource = <<"">>}} ->
             case Type of
-               ValidType when ValidType =:= ubuntu ->
+               ValidType when ValidType =:= ubuntu;
+                              ValidType =:= gcm ->
                     AppName =
                     proplists:get_value(app_name, BackendOpts),
                     BackendId =
@@ -1865,7 +1878,6 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                     parse_backends(T, Host, CertFile, [{Backend, AuthData}|Acc]);
 
                 NotYetImplemented when NotYetImplemented =:= apns;
-                                       NotYetImplemented =:= gcm;
                                        NotYetImplemented =:= wns ->
                     ?INFO_MSG("push backend type ~p not implemented yet",
                               [atom_to_list(NotYetImplemented)]),

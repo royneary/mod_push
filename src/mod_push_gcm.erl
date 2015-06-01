@@ -1,8 +1,8 @@
 %%%----------------------------------------------------------------------
-%%% File    : mod_push_ubuntu.erl
+%%% File    : mod_push_gcm.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
 %%% Purpose : Send push notifications to the Ubuntu Push service
-%%% Created : 07 Feb 2015 by Christian Ulrich <christian@rechenwerk.net>
+%%% Created : 01 June 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
 %%%
 %%% Copyright (C) 2015  Christian Ulrich
@@ -23,7 +23,7 @@
 %%%
 %%%----------------------------------------------------------------------
 
--module(mod_push_ubuntu).
+-module(mod_push_gcm).
 
 -author('christian@rechenwerk.net').
 
@@ -38,7 +38,7 @@
 
 -include("logger.hrl").
 
--define(PUSH_URL, "https://push.ubuntu.com/notify").
+-define(PUSH_URL, "https://gcm-http.googleapis.com/gcm/send").
 -define(EXPIRY_TIME, 60*60*24).
 -define(HTTP_TIMEOUT, 10000).
 -define(HTTP_CONNECT_TIMEOUT, 10000).
@@ -48,18 +48,17 @@
                     C =/= rc4_128, C =/= des_cbc, C =/= '3des_ede_cbc',
                     H =/= sha, H =/= md5]).
 
-% TODO: add message_queue
 -record(state,
         {certfile :: binary(),
-         too_many_pending = false :: boolean()}).
+         api_key :: binary()}).
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, CertFile]) ->
-    ?DEBUG("+++++++++ mod_push_ubuntu:init", []),
+init([_Host, AuthKey, CertFile]) ->
+    ?DEBUG("+++++++++ mod_push_gcm:init", []),
     inets:start(),
     ssl:start(),
-    {ok, #state{certfile = CertFile}}.
+    {ok, #state{certfile = CertFile, api_key = AuthKey}}.
 
 %-------------------------------------------------------------------------
 
@@ -71,23 +70,12 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, AppId, _Silent, DisableArgs},
-            #state{certfile = CertFile,
-                   too_many_pending = TooManyPending} = State) ->
-    % TODO: right now the clear_pending field is set if server replied with a
-    % too-many-pending error or if the include_senders option is set false. 
-    % There's an optional 'tag' field which we can use to tell the proprietary
-    % server to clear pending notifications triggered by the same sender in order to
-    % save bandwidth from proprietary server to client. So store a random tag per
-    % sender and set replace_tag: "sender_tag" in each push notification
+handle_cast({dispatch, Payload, Token, _AppId, _Silent, DisableArgs},
+            #state{certfile = CertFile, api_key = ApiKey} = State) ->
     ?DEBUG("+++++ Sending push notification to ~p", [?PUSH_URL]),
-    ClearPending =
-    TooManyPending, %or (FromL =:= undefined),
     PushMessage =
     {struct,
-     [{appid, AppId}, {expire_on, expiry_time()}, {token, Token},
-      {clear_pending, ClearPending},
-      {data, Payload}]},
+     [{to, Token}, {time_to_live, ?EXPIRY_TIME}, {data, Payload}]},
     ?DEBUG("+++++++ PushMessage (before encoding): ~p", [PushMessage]),
     Body = iolist_to_binary(mochijson2:encode(PushMessage)),
     ?DEBUG("+++++++ encoded json: ~s", [Body]),
@@ -99,7 +87,10 @@ handle_cast({dispatch, Payload, Token, AppId, _Silent, DisableArgs},
      {ssl, SslOpts}],
     Opts =
     [],
-    Request = {?PUSH_URL, [], "application/json", Body},
+    Authorization =
+    "key=" ++ binary_to_list(ApiKey),
+    Request =
+    {?PUSH_URL, [{"Authorization", Authorization}], "application/json", Body},
     Reply =
     try httpc:request(post, Request, HttpOpts, Opts) of
         {ok, {{_,200,_},_,RespBody}} ->
@@ -116,7 +107,7 @@ handle_cast({dispatch, Payload, Token, AppId, _Silent, DisableArgs},
 
     %DisableCb(),
     % FIXME: set too_many_pending according to server response
-    {noreply, State#state{too_many_pending = false}};
+    {noreply, State};
 
 handle_cast(_Req, State) -> {reply, {error, badarg}, State}.
 
@@ -129,12 +120,3 @@ terminate(_Reason, State) -> {noreply, State}.
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %-------------------------------------------------------------------------
-
-expiry_time() ->
-    Now = now(),
-    {_, Seconds, _} = Now,
-    Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
-    jlib:now_to_utc_string(Time).
-
-%-------------------------------------------------------------------------
-
