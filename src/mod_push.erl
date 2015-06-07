@@ -91,6 +91,7 @@
 
 -define(MODULE_APNS, mod_push_apns).
 -define(MODULE_GCM, mod_push_gcm).
+-define(MODULE_MOZILLA, mod_push_mozilla).
 -define(MODULE_UBUNTU, mod_push_ubuntu).
 -define(MODULE_WNS, mod_push_wns).
 
@@ -201,7 +202,7 @@
                              packet :: xmlelement()}).
 
 -type auth_data() :: #auth_data{}.
--type backend_type() :: apns | gcm | ubuntu | wns.
+-type backend_type() :: apns | gcm | mozilla | ubuntu | wns.
 -type bare_jid() :: {binary(), binary()}.
 -type device_id() :: binary().
 -type payload_key() ::
@@ -969,9 +970,12 @@ on_wait_for_resume(Timeout, #jid{luser = LUser, lserver = LServer, lresource = L
         end
     end,
     case mnesia:transaction(F) of
-        {atomic, AdjustedTimeout} -> AdjustedTimeout;
+        {atomic, AdjustedTimeout} ->
+            ?DEBUG("+++++++ adjusting timeout to ~p", [AdjustedTimeout]),
+            AdjustedTimeout;
         {aborted, Reason} ->
-            ?DEBUG("+++++++ mod_push could not read timeout: ", [Reason])
+            ?DEBUG("+++++++ mod_push could not read timeout: ~p", [Reason]),
+            Timeout
     end.
 
 %-------------------------------------------------------------------------
@@ -1141,6 +1145,7 @@ add_backends(Host, Opts) ->
                 end,
                 [{apns, ?MODULE_APNS},
                  {gcm, ?MODULE_GCM},
+                 {mozilla, ?MODULE_MOZILLA},
                  {ubuntu, ?MODULE_UBUNTU},
                  {wns, ?MODULE_WNS}])
             % TODO:
@@ -1247,6 +1252,20 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             case Parsed of
                 {result, [Token, DeviceId, DeviceName]} ->
                     register_client(From, LServer, gcm, Token, DeviceId,
+                                    DeviceName, <<"">>, undefined);
+
+                _ -> error
+            end;
+
+        <<"register-push-mozilla">> ->
+            Parsed = parse_form([XData],
+                                undefined,
+                                [{single, <<"token">>}],
+                                [{single, <<"device-id">>},
+                                 {single, <<"device-name">>}]),
+            case Parsed of
+                {result, [Token, DeviceId, DeviceName]} ->
+                    register_client(From, LServer, mozilla, Token, DeviceId,
                                     DeviceName, <<"">>, undefined);
 
                 _ -> error
@@ -1850,8 +1869,9 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
         {#jid{luser = <<"">>, lserver = RegisterHost, lresource = <<"">>},
          #jid{luser = <<"">>, lserver = PubsubHost, lresource = <<"">>}} ->
             case Type of
-               ValidType when ValidType =:= ubuntu;
-                              ValidType =:= gcm ->
+               ValidType when ValidType =:= gcm;
+                              ValidType =:= mozilla;
+                              ValidType =:= ubuntu ->
                     AppName =
                     proplists:get_value(app_name, BackendOpts),
                     BackendId =
