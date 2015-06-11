@@ -1241,7 +1241,26 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                                      action = <<"execute">>,
                                      xdata = XData} = Request) ->
     Result = case Command of
-        %<<"register-push-apns">> ->
+        <<"register-push-apns">> ->
+            Parsed = parse_form([XData],
+                                undefined,
+                                [{single, <<"token">>}],
+                                [{single, <<"device-id">>},
+                                 {single, <<"device-name">>}]),
+            case Parsed of
+                {result, [Base64Token, DeviceId, DeviceName]} ->
+                    case catch base64:decode(Base64Token) of
+                        {'EXIT', _} ->
+                            error;
+
+                        Token ->
+                            register_client(From, LServer, apns, Token,
+                                            DeviceId, DeviceName, <<"">>,
+                                            undefined)
+                    end;
+
+                _ -> error
+            end;
 
         <<"register-push-gcm">> ->
             Parsed = parse_form([XData],
@@ -1869,7 +1888,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
         {#jid{luser = <<"">>, lserver = RegisterHost, lresource = <<"">>},
          #jid{luser = <<"">>, lserver = PubsubHost, lresource = <<"">>}} ->
             case Type of
-               ValidType when ValidType =:= gcm;
+               ValidType when ValidType =:= apns;
+                              ValidType =:= gcm;
                               ValidType =:= mozilla;
                               ValidType =:= ubuntu ->
                     AppName =
@@ -1897,8 +1917,7 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                     },
                     parse_backends(T, Host, CertFile, [{Backend, AuthData}|Acc]);
 
-                NotYetImplemented when NotYetImplemented =:= apns;
-                                       NotYetImplemented =:= wns ->
+                NotYetImplemented when NotYetImplemented =:= wns ->
                     ?INFO_MSG("push backend type ~p not implemented yet",
                               [atom_to_list(NotYetImplemented)]),
                     invalid;
