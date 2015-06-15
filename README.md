@@ -56,10 +56,10 @@ _xmpp-server._tcp.push.example.net. 86400 IN SRV 5 0 5269 example.net.
 There are user-definable config options to specify what contents should be in
 a push notification. You can set default values for them in the mod_push
 section:
-* include_senders: include the jids of the last message sender and the last subscription sender (default: false)
-* include_message_count: include the number of queued messages (default: true)
-* include_subscription_count: include the number of queued subscription requests (default: true)
-* include_message_bodies: include the message contents (default: false)
+* `include_senders`: include the jids of the last message sender and the last subscription sender (default: false)
+* `include_message_count`: include the number of queued messages (default: true)
+* `include_subscription_count`: include the number of queued subscription requests (default: true)
+* `include_message_bodies`: include the message contents (default: false)
 
 example:
 ```yaml
@@ -75,16 +75,16 @@ notification services. This is not required, your users can use external app
 servers too. 
 
 ####Common options
-* register_host: the app server host where users can register. Should be the XMPP server host, so users don't have to guess it (no service discovery implemented yet).
-* pubsub_host: the pubsub_host of the backend
-* type: apns|gcm|mozilla|ubuntu|wns
-* app_name: the name of the app the backend is configured for, will be send to the user when service discovery is done on the register_host; the default value is "any", but that's only a valid value for backend types that don't require developer credentials, that is ubuntu and mozilla
+* `register_host`: the app server host where users can register. Should be the XMPP server host, so users don't have to guess it (no service discovery implemented yet).
+* `pubsub_host`: the pubsub_host of the backend
+* `type`: apns|gcm|mozilla|ubuntu|wns
+* `app_name`: the name of the app the backend is configured for, will be send to the user when service discovery is done on the register_host; the default value is "any", but that's only a valid value for backend types that don't require developer credentials, that is ubuntu and mozilla
 
 ####APNS-specific options
-* certfile: path to a pem file containing the developer's private key and the certificate obtained from Apple during the provisioning procedure
+* `certfile`: path to a pem file containing the developer's private key and the certificate obtained from Apple during the provisioning procedure
 
 ####GCM-specific options
-* auth_key: the API key obtained from Google's api console
+* `auth_key`: the API key obtained from Google's api console
 
 ####WNS
 TBD
@@ -117,15 +117,15 @@ mod_push:
 ```
 
 ##App server usage
-Clients can register by sending adhoc requests containing a data form with the 'urn:xmpp:push:options' FORM_TYPE.
+Clients can communicate with the app server by sending adhoc requests containing a data form with the 'urn:xmpp:push:options' FORM_TYPE.
 These are the available adhoc commands:
-* register-push-apns: register at an APNS backend
-* register-push-gcm: register at a GCM backend
-* register-push-mozilla: register at a Mozilla SimplePush backend
-* register-push-ubuntu: register at an Ubuntu Push backend
-* register-push-wns: register at a WNS backend
-* list-push-registrations: request a list of all registrations of the requesting user
-* unregister-push: delete the user's registrations (all of them or those matching a given list of node names)
+* `register-push-apns`: register at an APNS backend
+* `register-push-gcm`: register at a GCM backend
+* `register-push-mozilla`: register at a Mozilla SimplePush backend
+* `register-push-ubuntu`: register at an Ubuntu Push backend
+* `register-push-wns`: register at a WNS backend
+* `list-push-registrations`: request a list of all registrations of the requesting user
+* `unregister-push`: delete the user's registrations (all of them or those matching a given list of node names)
 
 Example:
 ```xml
@@ -146,23 +146,23 @@ Example:
 There are common fields which a client has to include for every backend type and there are backend-specific fields.
 
 ###Common fields for the register commands
-* token: the device identifier the client obtained from the push service
-* device-id: a device identifier a client can define explicitly (the jid's resource part will be used otherwise)
-* device-name: an optional name that will be included in the response to the list-push-registrations command
+* `token`: the device identifier the client obtained from the push service
+* `device-id`: a device identifier a client can define explicitly (the jid's resource part will be used otherwise)
+* `device-name`: an optional name that will be included in the response to the list-push-registrations command
 
 ###register-push-apns fields
-* token: the base64-encoded binary token obtained from APNS
-* silent-push: when set to true content-available will be set to 1, default vaule: false
+* `token`: the base64-encoded binary token obtained from APNS
+* `silent-push`: when set to true content-available will be set to 1, default vaule: false
 
 ###register-push-ubuntu fields
-* application-id: the app id as registered at Ubuntu's push service
+* `application-id`: the app id as registered at Ubuntu's push service
 
 ###register-push-wns fields
-* silent-push: TBD
+* `silent-push`: TBD
 
 ###unregister-push fields
-* device-id: Either device ID or a list of node IDs must be given. If none of these are in the payload, the resource of the from jid will be interpreted as device ID. If both device ID and node list are given, the device ID will be ignored and only registrations matching a node ID in the given list will be removed.
-* nodes: a list of node names; registrations mathing one of them will be removed
+* `device-id`: Either device ID or a list of node IDs must be given. If none of these are in the payload, the resource of the from jid will be interpreted as device ID. If both device ID and node list are given, the device ID will be ignored and only registrations matching a node ID in the given list will be removed.
+* `nodes`: a list of node names; registrations mathing one of them will be removed
 
 ###register command response
 The app server returns the jid of the pubsub host and a pubsub node name. The client can pass those to its XMPP server in the XEP-0357 enable request.
