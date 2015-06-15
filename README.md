@@ -117,7 +117,7 @@ mod_push:
 ```
 
 ##App server usage
-Clients can communicate with the app server by sending adhoc requests containing a data form with the 'urn:xmpp:push:options' FORM_TYPE.
+Clients can communicate with the app server by sending adhoc requests containing an XEP-0004 data form:
 These are the available adhoc commands:
 * `register-push-apns`: register at an APNS backend
 * `register-push-gcm`: register at a GCM backend
