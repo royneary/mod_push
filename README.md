@@ -22,7 +22,7 @@ git clone https://github.com/royneary/mod_push.git
 # copy the source code folder to the module sources folder of your ejabberd
 # installation (may be different on your machine)
 sudo cp -R mod_push /var/spool/jabber/.ejabberd-modules/sources/
-# if done right ejabberd will list mod_push as available module
+# if done right ejabberdctl will list mod_push as available module
 ejabberdctl modules_available
 # automatically compile and install mod_push
 ejabberdctl module_install mod_push 
