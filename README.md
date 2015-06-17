@@ -87,7 +87,8 @@ servers too.
 * `auth_key`: the API key obtained from Google's api console
 
 ####WNS
-TBD
+* `auth_key`: the client secret obtained from Microsoft Developer Center
+* `package_sid`: the package SID obtained from Microsoft Developer Center
 
 ###Example configuration
 ```yaml
@@ -106,11 +107,13 @@ mod_push:
       pubsub_host: "push.example.net"
     -
       type: gcm
+      app_name: "chatninja"
       register_host: "example.net"
       pubsub_host: "push.example.net"
       auth_key: "HgeGfbhwplu7F-fjCUf6gBfkauUaq12h0nHazqc" 
     -
       type: apns
+      app_name: "chatninja"
       register_host: "example.net"
       pubsub_host: "push.example.net"
       certfile: "/etc/ssl/private/apns_example_app.pem"  
@@ -158,7 +161,7 @@ There are common fields which a client has to include for every backend type and
 * `application-id`: the app id as registered at Ubuntu's push service
 
 ###register-push-wns fields
-* `silent-push`: TBD
+* `token`: the channel URI which must be escaped according to RFC 2396, you can use .NET's Uri.EscapeUriString method for that
 
 ###unregister-push fields
 * `device-id`: Either device ID or a list of node IDs must be given. If none of these are in the payload, the resource of the from jid will be interpreted as device ID. If both device ID and node list are given, the device ID will be ignored and only registrations matching a node ID in the given list will be removed.
