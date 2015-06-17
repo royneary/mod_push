@@ -55,7 +55,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, CertFile]) ->
+init([_Host, _AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_ubuntu:init", []),
     inets:start(),
     ssl:start(),

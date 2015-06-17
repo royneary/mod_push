@@ -1,7 +1,7 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push_apns.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
-%%% Purpose : Send push notifications to the Ubuntu Push service
+%%% Purpose : Send push notifications to the Apple Push Notification Service
 %%% Created : 07 Feb 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
 %%%
@@ -57,7 +57,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, CertFile]) ->
+init([_Host, _AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_apns:init", []),
     %inets:start(),
     crypto:start(),

@@ -1,8 +1,8 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push_mozilla.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
-%%% Purpose : Send push notifications to the Ubuntu Push service
-%%% Created : 07 June 2015 by Christian Ulrich <christian@rechenwerk.net>
+%%% Purpose : Send push notifications to the Mozilla Push service
+%%% Created : 07 Jun 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
 %%%
 %%% Copyright (C) 2015  Christian Ulrich
@@ -55,7 +55,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, CertFile]) ->
+init([_Host, _AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_mozilla:init", []),
     inets:start(),
     ssl:start(),

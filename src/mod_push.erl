@@ -160,6 +160,7 @@
 
 -record(auth_data,
         {auth_key = <<"">> :: binary(),
+         package_sid = <<"">> :: binary(),
          certfile = <<"">> :: binary()}).
 
 -record(subscription, {resource :: binary(),
@@ -1204,12 +1205,14 @@ start_workers(_Host, _Module, []) -> ok;
 
 start_workers(Host, Module,
               [{Backend,
-               #auth_data{auth_key = AuthKey, certfile = CertFile}}|T]) ->
+               #auth_data{auth_key = AuthKey,
+                          package_sid = PackageSid,
+                          certfile = CertFile}}|T]) ->
     Worker = Backend#push_backend.worker,
     BackendSpec =
     {Worker,
      {gen_server, start_link,
-      [{local, Worker}, Module, [Host, AuthKey, CertFile], []]},
+      [{local, Worker}, Module, [Host, AuthKey, PackageSid, CertFile], []]},
      permanent, 1000, worker, [?MODULE]},
     supervisor:start_child(ejabberd_sup, BackendSpec),
     start_workers(Host, Module, T).
@@ -1305,8 +1308,19 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                 _ -> error
             end;
 
-        %<<"register-push-wns">> ->
-            
+        <<"register-push-wns">> ->
+            Parsed = parse_form([XData],
+                                undefined,
+                                [{single, <<"token">>}],
+                                [{single, <<"device-id">>},
+                                 {single, <<"device-name">>}]),
+            case Parsed of
+                {result, [Token, DeviceId, DeviceName]} ->
+                    register_client(From, LServer, wns, Token, DeviceId,
+                                    DeviceName, <<"">>, undefined);
+
+                _ -> error
+            end;
 
         <<"unregister-push">> ->
             Parsed = parse_form([XData], undefined,
@@ -1891,7 +1905,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                ValidType when ValidType =:= apns;
                               ValidType =:= gcm;
                               ValidType =:= mozilla;
-                              ValidType =:= ubuntu ->
+                              ValidType =:= ubuntu;
+                              ValidType =:= wns ->
                     AppName =
                     proplists:get_value(app_name, BackendOpts),
                     BackendId =
@@ -1899,6 +1914,7 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                     AuthData =
                     #auth_data{
                         auth_key = proplists:get_value(auth_key, BackendOpts),
+                        package_sid = proplists:get_value(package_sid, BackendOpts),
                         certfile =
                         proplists:get_value(certfile, BackendOpts, CertFile)},
                     Worker =
@@ -1916,11 +1932,6 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                         worker = Worker
                     },
                     parse_backends(T, Host, CertFile, [{Backend, AuthData}|Acc]);
-
-                NotYetImplemented when NotYetImplemented =:= wns ->
-                    ?INFO_MSG("push backend type ~p not implemented yet",
-                              [atom_to_list(NotYetImplemented)]),
-                    invalid;
 
                 _ ->
                     ?INFO_MSG("unknown push backend type for pubsub host ~p",

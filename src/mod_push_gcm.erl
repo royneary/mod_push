@@ -1,8 +1,8 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push_gcm.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
-%%% Purpose : Send push notifications to the Ubuntu Push service
-%%% Created : 01 June 2015 by Christian Ulrich <christian@rechenwerk.net>
+%%% Purpose : Send push notifications to the Google Cloud Messaging service
+%%% Created : 01 Jun 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
 %%%
 %%% Copyright (C) 2015  Christian Ulrich
@@ -54,7 +54,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, AuthKey, CertFile]) ->
+init([_Host, AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_gcm:init", []),
     inets:start(),
     ssl:start(),
