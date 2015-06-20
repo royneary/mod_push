@@ -1098,7 +1098,7 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
     end,
     case mnesia:transaction(F) of
         {atomic, Result} -> Result;
-        {aborted, Reason} -> internal_server_error
+        {aborted, _Reason} -> internal_server_error
     end.
 
 %-------------------------------------------------------------------------
