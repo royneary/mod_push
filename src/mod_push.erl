@@ -74,7 +74,7 @@
 -export([start/2, stop/1,
          process_iq/3,
          on_store_stanza/4,
-         incoming_notification/2,
+         incoming_notification/3,
          on_affiliation_removal/4,
          on_unset_presence/4,
          on_resume_session/1,
@@ -461,20 +461,20 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
 -spec(enable/4 ::
 (
     UserJid :: jid(),
-    BackendJid :: jid(),
+    PubsubJid :: jid(),
     Node :: binary(),
     XData :: [false | xmlelement()])
     -> {error, xmlelement()} | {enabled, ok} | {enabled, [xmlelement()]}
 ).
 
-enable(_UserJid, _BackendJid, undefined, _XDataForms) ->
+enable(_UserJid, _PubsubJid, undefined, _XDataForms) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
-enable(_UserJid, _BackendJid, <<"">>, _XDataForms) ->
+enable(_UserJid, _PubsubJid, <<"">>, _XDataForms) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
 enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
-       #jid{lserver = PubsubHost} = BackendJid, Node, XDataForms) ->
+       #jid{lserver = PubsubHost} = PubsubJid, Node, XDataForms) ->
     ParsedSecret =
     parse_form(XDataForms, ?NS_PUBLISH_OPTIONS, [], [{single, <<"secret">>}]),
     ?DEBUG("+++++ ParsedSecret = ~p", [ParsedSecret]),
@@ -491,7 +491,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                 #push_backend{id = '$1', pubsub_host = PubsubHost, _='_'},
                 RegType =
                 case mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]) of
-                    [] -> {remote_reg, BackendJid, Secret};
+                    [] -> {remote_reg, PubsubJid, Secret};
                     _ -> {local_reg, PubsubHost}
                 end,
                 Subscr =
@@ -552,29 +552,29 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
 -spec(disable/3 ::
 (
     From :: jid(),
-    BackendJid :: jid(),
+    PubsubJid :: jid(),
     Node :: binary())
     -> {error, xmlelement()} | {disabled, ok} 
 ).
 
-disable(From, BackendJid, Node) -> disable(From, BackendJid, Node, false).
+disable(From, PubsubJid, Node) -> disable(From, PubsubJid, Node, false).
 
 %-------------------------------------------------------------------------
 
 -spec(disable/4 ::
 (
     From :: jid(),
-    BackendJid :: jid(),
+    PubsubJid :: jid(),
     Node :: binary(),
     StopSessions :: boolean())
     -> {error, xmlelement()} | {disabled, ok} 
 ).
 
-disable(_From, _BackendJid, <<"">>, _StopSessions) ->
+disable(_From, _PubsubJid, <<"">>, _StopSessions) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
 disable(#jid{luser = LUser, lserver = LServer},
-        #jid{lserver = PubsubHost} = BackendJid, Node, StopSessions) ->
+        #jid{lserver = PubsubHost} = PubsubJid, Node, StopSessions) ->
     SubscrPred =
     fun
         (#subscription{node = N, reg_type = RegT}) ->
@@ -584,9 +584,9 @@ disable(#jid{luser = LUser, lserver = LServer},
             case RegT of
                 {local_reg, P} -> P =:= PubsubHost;
                 {remote_reg, J, _} ->
-                    (J#jid.luser =:= BackendJid#jid.luser) and
-                    (J#jid.lserver =:= BackendJid#jid.lserver) and
-                    (J#jid.lresource =:= BackendJid#jid.lresource)
+                    (J#jid.luser =:= PubsubJid#jid.luser) and
+                    (J#jid.lserver =:= PubsubJid#jid.lserver) and
+                    (J#jid.lresource =:= PubsubJid#jid.lresource)
             end,
             NodeMatching and RegTypeMatching
     end,
@@ -740,9 +740,9 @@ on_store_stanza(RerouteFlag,
                             end;
                            
                         (#subscription{node = NodeId,
-                                       reg_type = {remote_reg, PubsubHost, Secret}}, _Acc) -> 
+                                       reg_type = {remote_reg, PubsubJid, Secret}}, _Acc) -> 
                             ?DEBUG("++++ on_store_stanza: dispatching remotely", []),
-                            dispatch_remote(To, PubsubHost, NodeId, Payload, Secret),
+                            dispatch_remote(To, PubsubJid, NodeId, Payload, Secret),
                             mnesia:write(StoredPacket),
                             dispatched
                         end,
@@ -818,38 +818,46 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
 -spec(dispatch_remote/5 ::
 (
     User :: jid(),
-    PubsubHost :: jid(),
+    PubsubJid :: jid(),
     NodeId :: binary(),
     Payload :: payload(),
     _Secret :: binary())
     -> any()
 ).
 
-dispatch_remote(User, PubsubHost, NodeId, Payload, _Secret) ->
+dispatch_remote(User, PubsubJid, NodeId, Payload, _Secret) ->
     % TODO send secret as publish-option
+    MakeKey =
+    fun(Atom) ->
+        binary:replace(atom_to_binary(Atom, utf8), <<"_">>, <<"-">>)
+    end,
     Fields =
     lists:foldl(
         fun
         ({Key, Value}, Acc) when is_binary(Value) ->
-            [?VFIELD(atom_to_binary(Key, utf8), Value)|Acc];
+            [?VFIELD(MakeKey(Key), Value)|Acc];
 
         ({Key, Value}, Acc) when is_integer(Value) ->
-            [?VFIELD(atom_to_binary(Key, utf8), integer_to_binary(Value))|Acc]
+            [?VFIELD(MakeKey(Key), integer_to_binary(Value))|Acc]
         end,
-        [],
+        [?HFIELD(?NS_PUSH_SUMMARY)],
         Payload),
     Notification =
     #xmlel{name = <<"notification">>, attrs = [{<<"xmlns">>, ?NS_PUSH}],
            children =
-           [#xmlel{name = <<"x">>, attrs = [{<<"xmlns">>, ?NS_XDATA}],
+           [#xmlel{name = <<"x">>,
+                   attrs = [{<<"xmlns">>, ?NS_XDATA}, {<<"type">>, <<"submit">>}],
                    children = Fields}]},
     Iq =
-    #iq{type = set, xmlns = ?NS_PUBSUB,
-        sub_el =
-        #xmlel{name = <<"publish">>, attrs = [{<<"node">>, NodeId}],
-               children =
-               [#xmlel{name = <<"item">>, children = [Notification]}]}},
-    ejabberd_router:route(User, PubsubHost, Iq).
+    #xmlel{name = <<"iq">>, attrs = [{<<"type">>, <<"set">>}],
+        children =
+        [#xmlel{name = <<"pubsub">>, attrs = [{<<"xmlns">>, ?NS_PUBSUB}],
+                children =
+                [#xmlel{name = <<"publish">>, attrs = [{<<"node">>, NodeId}],
+                        children =
+                        [#xmlel{name = <<"item">>,
+                                children = [Notification]}]}]}]},
+    ejabberd_router:route(User, PubsubJid, Iq).
 
 %-------------------------------------------------------------------------
 
@@ -1003,8 +1011,9 @@ on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource})
 
 %-------------------------------------------------------------------------
 
--spec(incoming_notification/2 ::
+-spec(incoming_notification/3 ::
 (
+    _HookAcc :: any(),
     NodeId :: binary(),
     Payload :: xmlelement())
     -> any()
@@ -1013,9 +1022,10 @@ on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource})
 % FIXME: test this!
 % FIXME: when mod_pubsub has implemented publish-options another argument
 %        'Options' is needed
-incoming_notification(NodeId, #xmlel{name = <<"notification">>,
-                                     attrs = [{<<"xmlns">>, ?NS_PUSH}],
-                                     children = Children}) ->
+incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
+                                                attrs = [{<<"xmlns">>, ?NS_PUSH}],
+                                                children = Children}|_]) ->
+    ?DEBUG("+++++ in mod_push:incoming_notification, NodeId: ~p", [NodeId]),
     ProcessReg =
     fun(#push_registration{id = RegId,
                            token = Token,
@@ -1052,20 +1062,20 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                             fun({Key, Value}, Acc) ->
                                 case Value of
                                     undefined -> Acc;
+                                    #jid{} -> jlib:jid_to_string(Value);
                                     _ -> [{Key, Value}|Acc]
                                 end
                             end,
                             [],
                             [{message_count, MsgCount},
-                             {last_message_sender,
-                              jlib:jid_to_string(MsgSender)},
+                             {last_message_sender, MsgSender},
                              {last_message_body, MsgBody},
                              {pending_subscription_count, SubscrCount},
-                             {last_subscription_sender,
-                              jlib:jid_to_string(SubscrSender)}]),
+                             {last_subscription_sender, SubscrSender}]),
                         dispatch_local(Payload, Token, AppId, BackendId, Silent,
                                        RegId, Timestamp, false); 
-                     _ ->
+                     Err ->
+                        ?DEBUG("+++++ parse_form returned ~p", [Err]),
                         ?INFO_MSG("Cancel dispatching push notification: "
                                   "item published on node ~p contains "
                                   "malformed data form", [NodeId]),
@@ -1082,12 +1092,13 @@ incoming_notification(NodeId, #xmlel{name = <<"notification">>,
                 node_not_found;
 
             Registrations ->
-                lists:for_each(ProcessReg, Registrations)
+                ?DEBUG("+++++ Registrations = ~p", [Registrations]),
+                lists:foreach(ProcessReg, Registrations)
         end
     end,
     case mnesia:transaction(F) of
         {atomic, Result} -> Result;
-        {aborted, _} -> internal_server_error
+        {aborted, Reason} -> internal_server_error
     end.
 
 %-------------------------------------------------------------------------
@@ -2152,38 +2163,40 @@ parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
     case jlib:parse_xdata_submit(XDataForm) of
         invalid -> parse_form(T, FormType, RequiredFields, OptionalFields);
         Fields ->
-            GetValues =
-                fun
-                ({multi, Key}) -> get_xdata_values(Key, Fields);
-                ({single, Key}) -> get_xdata_value(Key, Fields);
-                ({KeyTuple, Convert}) ->
-                    case KeyTuple of
-                        {multi, Key} ->
-                            Values = get_xdata_values(Key, Fields),
-                            Converted = lists:foldl(
-                                fun
-                                (_, error) -> error;
-                                (B, Acc) ->
-                                    try [Convert(B)|Acc]
-                                    catch error:badarg -> error
-                                    end
-                                end,
-                                [],
-                                Values),
-                            lists:reverse(Converted);
-
-                        {single, Key} ->
-                            case get_xdata_value(Key, Fields) of
-                                error -> error;
-                                Value ->
-                                   try Convert(Value)
-                                   catch error:badarg -> error
-                                   end
-                            end
-                    end
-            end,
             case get_xdata_value(<<"FORM_TYPE">>, Fields) of
                 FormType ->
+                    GetValues =
+                    fun
+                        ({multi, Key}) -> get_xdata_values(Key, Fields);
+                        ({single, Key}) -> get_xdata_value(Key, Fields);
+                        ({KeyTuple, Convert}) ->
+                            case KeyTuple of
+                                {multi, Key} ->
+                                    Values = get_xdata_values(Key, Fields),
+                                    Converted = lists:foldl(
+                                        fun
+                                        (_, error) -> error;
+                                        (undefined, Acc) -> [undefined|Acc];
+                                        (B, Acc) ->
+                                            try [Convert(B)|Acc]
+                                            catch error:badarg -> error
+                                            end
+                                        end,
+                                        [],
+                                        Values),
+                                    lists:reverse(Converted);
+
+                                {single, Key} ->
+                                    case get_xdata_value(Key, Fields) of
+                                        error -> error;
+                                        undefined -> undefined;
+                                        Value ->
+                                           try Convert(Value)
+                                           catch error:badarg -> error
+                                           end
+                                    end
+                            end
+                    end,
                     RequiredValues = lists:map(GetValues, RequiredFields),
                     OptionalValues = lists:map(GetValues, OptionalFields),
                     RequiredOk =

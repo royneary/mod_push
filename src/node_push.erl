@@ -130,17 +130,19 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
     %% the published items from the node_push_publish_item hook, an XEP-0114-
     %% connected app server must use nodetree_tree and receives the items via
     %% XEP-0060 notification stanzas
+    ?DEBUG("++++++ node_push:publish_item, node = ~p", [Nidx]),
     VirtualNode = nodetree_virtual:get_node(Nidx),
     [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
     NodeId = VirtualNode#pubsub_node.nodeid,
     Result =
     ejabberd_hooks:run_fold(node_push_publish_item, Host, none,
                             [NodeId, Payload]),
+    ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
     case Result of
         none ->
             node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
                                        ItemId, Payload);
-        ok -> {result, ok};
+        ok -> {result, default};
         bad_request -> {error, ?ERR_BAD_REQUEST};
         node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
         not_authorized -> {error, ?ERR_FORBIDDEN};
