@@ -106,7 +106,7 @@ handle_cast({dispatch, Payload, Token, _AppId, _Silent, DisableArgs},
     end,
     PushMessage =
     {struct,
-     [{aps, {struct, [{alert, <<"XMPP event!">>}|Payload]}}]},
+     [{aps, {struct, [{'content-available', 1}|Payload]}}]},
     EncodedMessage =
     iolist_to_binary(mochijson2:encode(PushMessage)),
     ?DEBUG("++++++ Encoded message: ~p", [EncodedMessage]),
