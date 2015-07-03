@@ -74,7 +74,7 @@
 -export([start/2, stop/1,
          process_iq/3,
          on_store_stanza/4,
-         incoming_notification/3,
+         incoming_notification/4,
          on_affiliation_removal/4,
          on_unset_presence/4,
          on_resume_session/1,
@@ -821,12 +821,11 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
     PubsubJid :: jid(),
     NodeId :: binary(),
     Payload :: payload(),
-    _Secret :: binary())
+    Secret :: binary())
     -> any()
 ).
 
-dispatch_remote(User, PubsubJid, NodeId, Payload, _Secret) ->
-    % TODO send secret as publish-option
+dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
     MakeKey =
     fun(Atom) ->
         binary:replace(atom_to_binary(Atom, utf8), <<"_">>, <<"-">>)
@@ -848,6 +847,18 @@ dispatch_remote(User, PubsubJid, NodeId, Payload, _Secret) ->
            [#xmlel{name = <<"x">>,
                    attrs = [{<<"xmlns">>, ?NS_XDATA}, {<<"type">>, <<"submit">>}],
                    children = Fields}]},
+    PubOpts =
+    case is_binary(Secret) of
+        true ->
+            [#xmlel{name = <<"publish-options">>,
+                    children =
+                    [#xmlel{name = <<"x">>,
+                            attrs = [{<<"xmlns">>, ?NS_XDATA},
+                                     {<<"type">>, <<"submit">>}],
+                            children = [?HFIELD(?NS_PUBLISH_OPTIONS),
+                                        ?VFIELD(<<"secret">>, Secret)]}]}];
+        false -> []
+    end,
     Iq =
     #xmlel{name = <<"iq">>, attrs = [{<<"type">>, <<"set">>}],
         children =
@@ -856,7 +867,7 @@ dispatch_remote(User, PubsubJid, NodeId, Payload, _Secret) ->
                 [#xmlel{name = <<"publish">>, attrs = [{<<"node">>, NodeId}],
                         children =
                         [#xmlel{name = <<"item">>,
-                                children = [Notification]}]}]}]},
+                                children = [Notification]}]}] ++ PubOpts}]},
     ejabberd_router:route(User, PubsubJid, Iq).
 
 %-------------------------------------------------------------------------
@@ -1011,21 +1022,20 @@ on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource})
 
 %-------------------------------------------------------------------------
 
--spec(incoming_notification/3 ::
+-spec(incoming_notification/4 ::
 (
     _HookAcc :: any(),
     NodeId :: binary(),
-    Payload :: xmlelement())
+    Payload :: xmlelement(),
+    PubOpts :: xmlelement())
     -> any()
 ).
 
-% FIXME: test this!
-% FIXME: when mod_pubsub has implemented publish-options another argument
-%        'Options' is needed
 incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                                                 attrs = [{<<"xmlns">>, ?NS_PUSH}],
-                                                children = Children}|_]) ->
-    ?DEBUG("+++++ in mod_push:incoming_notification, NodeId: ~p", [NodeId]),
+                                                children = Children}|_],
+                      PubOpts) ->
+    ?DEBUG("+++++ in mod_push:incoming_notification, NodeId: ~p, PubOpts = ~p", [NodeId, PubOpts]),
     ProcessReg =
     fun(#push_registration{id = RegId,
                            token = Token,
@@ -1034,53 +1044,58 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                            backend_id = BackendId,
                            silent_push = Silent,
                            timestamp = Timestamp}) ->
-        % TODO: check secret
-        case get_xdata_elements(Children) of
-           [] ->
-               dispatch_local([], Token, AppId, BackendId, Silent, RegId,
-                              Timestamp, false);
+        case check_secret(Secret, PubOpts) of
+            true ->
+                case get_xdata_elements(Children) of
+                   [] ->
+                       dispatch_local([], Token, AppId, BackendId, Silent, RegId,
+                                      Timestamp, false);
 
-            XDataForms ->
-                ParseResult =
-                parse_form(
-                    XDataForms, ?NS_PUSH_SUMMARY, [],
-                    [{{single, <<"message-count">>},
-                      fun erlang:binary_to_integer/1},
-                     {{single, <<"last-message-sender">>},
-                      fun jlib:string_to_jid/1},
-                     {single, <<"last-message-body">>},
-                     {{single, <<"pending-subscription-count">>},
-                      fun erlang:binary_to_integer/1},
-                     {{single, <<"last-subscription-sender">>},
-                      fun jlib:string_to_jid/1}]),
-                case ParseResult of
-                    {result,
-                     [MsgCount, MsgSender, MsgBody, SubscrCount,
-                      SubscrSender]} ->
-                        Payload =
-                        lists:foldl(
-                            fun({Key, Value}, Acc) ->
-                                case Value of
-                                    undefined -> Acc;
-                                    #jid{} -> jlib:jid_to_string(Value);
-                                    _ -> [{Key, Value}|Acc]
-                                end
-                            end,
-                            [],
-                            [{message_count, MsgCount},
-                             {last_message_sender, MsgSender},
-                             {last_message_body, MsgBody},
-                             {pending_subscription_count, SubscrCount},
-                             {last_subscription_sender, SubscrSender}]),
-                        dispatch_local(Payload, Token, AppId, BackendId, Silent,
-                                       RegId, Timestamp, false); 
-                     Err ->
-                        ?DEBUG("+++++ parse_form returned ~p", [Err]),
-                        ?INFO_MSG("Cancel dispatching push notification: "
-                                  "item published on node ~p contains "
-                                  "malformed data form", [NodeId]),
-                        bad_request
-                end
+                    XDataForms ->
+                        ParseResult =
+                        parse_form(
+                            XDataForms, ?NS_PUSH_SUMMARY, [],
+                            [{{single, <<"message-count">>},
+                              fun erlang:binary_to_integer/1},
+                             {{single, <<"last-message-sender">>},
+                              fun jlib:string_to_jid/1},
+                             {single, <<"last-message-body">>},
+                             {{single, <<"pending-subscription-count">>},
+                              fun erlang:binary_to_integer/1},
+                             {{single, <<"last-subscription-sender">>},
+                              fun jlib:string_to_jid/1}]),
+                        case ParseResult of
+                            {result,
+                             [MsgCount, MsgSender, MsgBody, SubscrCount,
+                              SubscrSender]} ->
+                                Payload =
+                                lists:foldl(
+                                    fun({Key, Value}, Acc) ->
+                                        case Value of
+                                            undefined -> Acc;
+                                            #jid{} -> jlib:jid_to_string(Value);
+                                            _ -> [{Key, Value}|Acc]
+                                        end
+                                    end,
+                                    [],
+                                    [{message_count, MsgCount},
+                                     {last_message_sender, MsgSender},
+                                     {last_message_body, MsgBody},
+                                     {pending_subscription_count, SubscrCount},
+                                     {last_subscription_sender, SubscrSender}]),
+                                dispatch_local(Payload, Token, AppId, BackendId,
+                                               Silent, RegId, Timestamp, false);
+                             Err ->
+                                ?DEBUG("+++++ parse_form returned ~p", [Err]),
+                                ?INFO_MSG("Cancel dispatching push "
+                                          "notification: item published on node"
+                                          " ~p contains malformed data form",
+                                          [NodeId]),
+                                bad_request
+                        end
+                end;
+ 
+            false -> not_authorized
         end
     end,
     F = fun() ->
@@ -1099,6 +1114,21 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
     case mnesia:transaction(F) of
         {atomic, Result} -> Result;
         {aborted, _Reason} -> internal_server_error
+    end.
+
+%-------------------------------------------------------------------------
+
+-spec(check_secret/2 ::
+(
+    Secret :: binary(),
+    Opts :: [any()])
+    -> boolean()
+).
+
+check_secret(Secret, PubOpts) ->
+    case proplists:get_value(<<"secret">>, PubOpts) of
+        [Secret] -> true;
+        _ -> false
     end.
 
 %-------------------------------------------------------------------------
@@ -1354,20 +1384,21 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
     case Result of
         ok -> Acc;
 
-        % TODO: include secret as publish-option
-        {registered, {PubsubHost, Node, _Secret}} ->
+        {registered, {PubsubHost, Node, Secret}} ->
             JidField = [?VFIELD(<<"jid">>, PubsubHost)],
             NodeField = case Node of
                 <<"">> -> [];
                 _ -> [?VFIELD(<<"node">>, Node)]
             end,
+            SecretField = [?VFIELD(<<"secret">>, Secret)],
             Response =
             #adhoc_response{
                 status = completed,
                 elements = [#xmlel{name = <<"x">>,
                                    attrs = [{<<"xmlns">>, ?NS_XDATA},
                                             {<<"type">>, <<"result">>}],
-                                   children = JidField ++ NodeField}]},
+                                   children =
+                                   JidField ++ NodeField ++ SecretField}]},
             adhoc:produce_response(Request, Response);
 
         {unregistered, ok} ->
@@ -1597,9 +1628,6 @@ on_disco_reg_identity(Acc, _From, _To, _Node, _Lang) ->
 %on_disco_sm_info(Acc, From, To, Node, Lang) ->
 %    % TODO:
 %    % <x xmlns='jabber:x:data'>
-%    %   <field var='FORM_TYPE'>
-%    %     <value>http://jabber.org/protocol/pubsub#publish-options</value>
-%    %   </field>
 %    %   <field var='include-bodies'><value>0<value></field>
 %    %   <field var='include-senders'><value>0<value></field>
 %    %   <field var='include-message-count'><value>1<value></field>

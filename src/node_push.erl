@@ -42,7 +42,7 @@
 	 purge_node/2,
 	 subscribe_node/8,
 	 unsubscribe_node/4,
-	 publish_item/6,
+	 publish_item/7,
 	 delete_item/4,
 	 remove_extra_items/3,
 	 get_entity_affiliations/2,
@@ -125,7 +125,7 @@ subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast, PresenceSubscrip
 unsubscribe_node(Nidx, Sender, Subscriber, SubID) ->
     node_hometree:unsubscribe_node(Nidx, Sender, Subscriber, SubID).
 
-publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
+publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload, PubOpts) ->
     %% mod_push's internal app server must use nodetree_virtual and receives
     %% the published items from the node_push_publish_item hook, an XEP-0114-
     %% connected app server must use nodetree_tree and receives the items via
@@ -136,12 +136,12 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload) ->
     NodeId = VirtualNode#pubsub_node.nodeid,
     Result =
     ejabberd_hooks:run_fold(node_push_publish_item, Host, none,
-                            [NodeId, Payload]),
+                            [NodeId, Payload, PubOpts]),
     ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
     case Result of
         none ->
             node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
-                                       ItemId, Payload);
+                                       ItemId, Payload, PubOpts);
         ok -> {result, default};
         bad_request -> {error, ?ERR_BAD_REQUEST};
         node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};

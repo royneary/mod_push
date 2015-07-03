@@ -112,15 +112,17 @@ register_story(Config) ->
                            Reply),
             XData = get_adhoc_payload(Reply),
             escalus:assert(fun valid_response_form/1, XData),
-            XDataValueOk = fun(Key, XData) ->
-                is_valid_xdata_value(get_xdata_value(Key, XData))
+            XDataValueOk = fun(Key, XDataForm) ->
+                is_valid_xdata_value(get_xdata_value(Key, XDataForm))
             end,
             escalus:assert(XDataValueOk, [<<"jid">>], XData),
             escalus:assert(XDataValueOk, [<<"node">>], XData),
+            escalus:assert(XDataValueOk, [<<"secret">>], XData),
             ets:insert(?config(table, Config),
                        {alice,
                         get_xdata_value(<<"jid">>, XData),
                         get_xdata_value(<<"node">>, XData),
+                        get_xdata_value(<<"secret">>, XData),
                         DeviceName})
         end,
         lists:foreach(
@@ -139,7 +141,7 @@ register_story(Config) ->
                        [<<"list-push-registrations">>, <<"completed">>],
                        ListReply2),
         Regs = ets:select(?config(table, Config),
-                          [{{alice, '$1', '$2', '$3'}, [], [{{'$2', '$3'}}]}]),
+                          [{{alice, '$1', '$2', '$3', '$4'}, [], [{{'$2', '$4'}}]}]),
         XData = get_adhoc_payload(ListReply2),
         escalus:assert(fun valid_response_form/1, XData),
         escalus:assert(fun has_registrations/2, [Regs], XData)
@@ -171,7 +173,7 @@ disco_appserver_story(Config) ->
 disco_pubsub_story(Config) ->
     escalus:story(Config, [{alice, 1}], fun(Alice) ->
 
-        {alice, PubsubServer, _, _} = hd(ets:lookup(?config(table, Config), alice)),
+        {alice, PubsubServer, _, _, _} = hd(ets:lookup(?config(table, Config), alice)),
         Request = escalus_stanza:disco_info(PubsubServer),
         escalus:send(Alice, Request),
         Reply = escalus:wait_for_stanza(Alice),
