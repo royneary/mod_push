@@ -232,13 +232,13 @@ register_client(#jid{luser = LUser,
                     <<"">> -> LResource;
                     _ -> DeviceId
                 end,
+                Secret = randoms:get_string(),
                 ExistingReg =
                 mnesia:read({push_registration,
                              {{LUser, LServer}, ChosenDeviceId}}),
                 Registration =
                 case ExistingReg of
                     [] ->
-                        Secret = randoms:get_string(),
                         NewNode = randoms:get_string(),
                         #push_registration{id = {{LUser, LServer}, ChosenDeviceId},
                                            node = NewNode,
@@ -252,6 +252,7 @@ register_client(#jid{luser = LUser,
                     [OldReg] ->
                         OldReg#push_registration{device_name = DeviceName,
                                                  token = Token,
+                                                 secret = Secret,
                                                  app_id = AppId,
                                                  backend_id = BackendId,
                                                  silent_push = Silent,
