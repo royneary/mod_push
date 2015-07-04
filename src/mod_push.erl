@@ -25,38 +25,8 @@
 %%%
 %%%----------------------------------------------------------------------
 
-%%% implements XEP-0357 Push
-%%% global options:
-%%% {backends, [list_of_services]} 
-%%% config options per proprietary push service:
-%%% {host, binary()}
-%%% {type, gcm | apns | ubuntu | wns | binary()}
-%%% {client, binary()}
-%%% {include_senders, true|false} (default: false)
-%%% {include_message_count, true|false}
-%%% {auth_key, "string"} (default: "")
-%%% {certfile, "path/to/cert"}
-%%% {silent_push, true|false}
-%%% e.g.:
-%%% mod_push:
-%%%     include_senders: false
-%%%     silent_push : true
-%%%     backends:
-%%%         -
-%%%             register_host: "chatninja.org"
-%%%             pubsub_host: "push-gcm.chatninja.org"
-%%%             type: gcm
-%%%             app_name: "chatninja"
-%%%             auth_key: "ABCDEFG"
-%%%         -
-%%%             host: "push-apns.chatninja.org"
-%%%             type: apns
-%%%             app_name: "chatninja"
-%%%             include_senders: true
-%%%             certfile: "/etc/jabber/apns_cert.pem"
-%%%         -
-%%%             host: "push-up.chatninja.org"
-%%%             type: up
+%%% implements XEP-0357 Push and an IM-focussed app server
+
 % TODO: more push events:
 % - stream errors,
 % - server available (after restart),
@@ -684,8 +654,8 @@ on_store_stanza(RerouteFlag,
                 From,
                 #jid{luser = LUser, lserver = LServer, lresource = LResource} = To,
                 Stanza) ->
-    ?DEBUG("++++++++++++ Stored Stanza for ~p",
-           [jlib:jid_to_string({LUser, LServer, LResource})]),
+    ?DEBUG("++++++++++++ Stored Stanza for ~p from ~p: ~p",
+           [To, From, Stanza]),
     %PreferFullJid = fun(Subscriptions) ->
     %    MatchingFullJid =
     %    lists:filter(
@@ -1106,9 +1076,9 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                           [NodeId]),
                 node_not_found;
 
-            Registrations ->
-                ?DEBUG("+++++ Registrations = ~p", [Registrations]),
-                lists:foreach(ProcessReg, Registrations)
+            [Reg] ->
+                ?DEBUG("+++++ Registration = ~p", [Reg]),
+                ProcessReg(Reg)
         end
     end,
     case mnesia:transaction(F) of
@@ -1999,6 +1969,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
     Config :: user_config())
     -> payload()
 ).
+
+make_payload(error, _Stanza, _OldPayload, _Config) -> none;
 
 make_payload(From, Stanza, OldPayload,
              #user_config{include_senders = IncSenders,
