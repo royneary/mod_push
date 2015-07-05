@@ -43,12 +43,12 @@
 
 -export([start/2, stop/1,
          process_iq/3,
-         on_store_stanza/4,
+         on_store_stanza/3,
          incoming_notification/4,
          on_affiliation_removal/4,
          on_unset_presence/4,
          on_resume_session/1,
-         on_wait_for_resume/2,
+         on_wait_for_resume/3,
          on_disco_sm_features/5,
          on_disco_pubsub_info/5,
          on_disco_reg_identity/5,
@@ -641,104 +641,146 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
 
 %-------------------------------------------------------------------------
 
--spec(on_store_stanza/4 ::
+-spec(on_store_stanza/3 ::
 (
     Acc :: any(),
-    From :: jid(),
     To :: jid(),
     Stanza :: xmlelement())
     -> any()
 ).
 
 %% called on hook mgmt_queue_add_hook
-on_store_stanza(RerouteFlag,
-                From,
-                #jid{luser = LUser, lserver = LServer, lresource = LResource} = To,
-                Stanza) ->
-    ?DEBUG("++++++++++++ Stored Stanza for ~p from ~p: ~p",
-           [To, From, Stanza]),
-    %PreferFullJid = fun(Subscriptions) ->
-    %    MatchingFullJid =
-    %    lists:filter(
-    %        fun (S) when S#subscription.resource =:= LResource -> true;
-    %            (_) -> false
-    %        end,
-    %        Subscriptions),
-    %    case MatchingFullJid of
-    %        [] -> Subscriptions;
-    %        [Matching] -> [Matching]
-    %    end
-    %end,
-    F = fun() ->
-        MatchHeadUser = #push_user{bare_jid = {LUser, LServer}, _='_'},
-        case mnesia:select(push_user, [{MatchHeadUser, [], ['$_']}]) of
-            [] -> ok;
-            [#push_user{subscriptions = Subscriptions,
-                        config = Config,
-                        payload = StoredPayload} = User] ->
-                case make_payload(From, Stanza, StoredPayload, Config) of
-                    none -> ok;
-                    Payload ->
-                        mnesia:write(User#push_user{payload = Payload}),
-                        StoredPacket =
-                        #push_stored_packet{receiver = jlib:jid_tolower(To),
-                                            sender = From, packet = Stanza},
-                        ProcessSubscription =
-                        fun
-                        (#subscription{node = NodeId, reg_type = {local_reg, _}}, Acc) ->
-                            MatchHeadReg =
-                            #push_registration{id = {{LUser, LServer}, '_'},
-                                               node = NodeId, _='_'},
-                            SelectedRegs =
-                            mnesia:select(push_registration,
-                                          [{MatchHeadReg, [], ['$_']}]),
-                            case SelectedRegs of
-                                [] ->
-                                    ?DEBUG("+++++++ No registration found for node ~p", [NodeId]),
-                                    Acc;
-
-                                [#push_registration{id = RegId,
-                                                    token = Token,
-                                                    app_id = AppId,
-                                                    backend_id = BackendId,
-                                                    silent_push = Silent,
-                                                    timestamp = Timestamp}] ->
-                                    ?DEBUG("++++ on_store_stanza: found registration, dispatch locally", []),
-                                    dispatch_local(Payload, Token, AppId, BackendId,
-                                                   Silent, RegId, Timestamp, true),
-                                    mnesia:write(StoredPacket),
-                                    dispatched
-                            end;
-                           
-                        (#subscription{node = NodeId,
-                                       reg_type = {remote_reg, PubsubJid, Secret}}, _Acc) -> 
-                            ?DEBUG("++++ on_store_stanza: dispatching remotely", []),
-                            dispatch_remote(To, PubsubJid, NodeId, Payload, Secret),
-                            mnesia:write(StoredPacket),
-                            dispatched
-                        end,
-                        Filtered =
-                        lists:filter(
-                            fun(#subscription{resource = Resource}) ->
-                                Resource =:= LResource
-                            end,
-                            Subscriptions),
-                        lists:foldl(ProcessSubscription, ok, Filtered)
-                        %lists:foreach(ProcessSubscription, PreferFullJid(Subscriptions))
-                end
-        end
-    end,
+on_store_stanza(RerouteFlag, To, Stanza) ->
+    ?DEBUG("++++++++++++ Stored Stanza for ~p: ~p",
+           [To, Stanza]),
+    F = fun() -> dispatch([{now(), Stanza}], To, false) end,
     case mnesia:transaction(F) of
-        {aborted, Error} ->
-            ?DEBUG("+++++ error in on_store_stanza: ~p", [Error]),
-            RerouteFlag;
-        {atomic, ok} -> RerouteFlag;
-        {atomic, dispatched} ->
+        {atomic, not_subscribed} -> RerouteFlag;
+        
+        {atomic, ok} ->
             case RerouteFlag of
                 true -> false_on_system_shutdown;
                 _ -> RerouteFlag
+            end;
+
+        {aborted, Error} ->
+            ?DEBUG("+++++ error in on_store_stanza: ~p", [Error]),
+            RerouteFlag
+    end.
+                                      
+%-------------------------------------------------------------------------
+
+-spec(dispatch/3 ::
+(
+    Stanzas :: [{erlang:timestamp(), xmlelement()}],
+    UserJid :: jid(),
+    SetPending :: boolean())
+    -> ok | not_subscribed
+).
+
+dispatch(Stanzas, UserJid, SetPending) ->
+    #jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
+    case mnesia:read({push_user, {LUser, LServer}}) of
+        [] -> not_subscribed;
+        [PushUser] ->
+            ?DEBUG("+++++ dispatch: found push_user", []),
+            #push_user{subscriptions = Subscrs, config = Config,
+                       payload = OldPayload} = PushUser,
+            NewSubscrs = case SetPending of
+                true -> set_pending(LResource, true, Subscrs);
+                false -> Subscrs
+            end,
+            ?DEBUG("+++++ NewSubscrs = ~p", [NewSubscrs]),
+            MatchingSubscr =
+            [M || #subscription{pending = P, resource = R} = M <- NewSubscrs,
+                  P =:= true, R =:= LResource],
+            case MatchingSubscr of
+                [] -> not_subscribed;
+                [#subscription{reg_type = RegType, node = NodeId}] ->
+                    ?DEBUG("+++++ dispatch: found subscription", []),
+                    WriteUser =
+                    fun(Payload) ->
+                        NewPayload = case Payload of
+                            none -> OldPayload;
+                            _ -> Payload
+                        end,
+                        NewUser =
+                        PushUser#push_user{subscriptions = NewSubscrs,
+                                           payload = NewPayload},
+                        mnesia:write(NewUser)
+                    end,
+                    PayloadResult =
+                    make_payload({unacked_stanzas, Stanzas}, OldPayload,
+                                 Config),
+                    case PayloadResult of
+                        none ->
+                            ?DEBUG("+++++ dispatch: no payload", []),
+                            case SetPending of
+                                true -> WriteUser(none);
+                                false -> ok
+                            end;
+
+                        {Payload, StanzasToStore} ->
+                            ?DEBUG("+++++ dispatch: payload ~p", [Payload]),
+                            Receiver = jlib:jid_tolower(UserJid),
+                            lists:foreach(
+                                fun({Timestamp, Stanza}) ->
+                                    StoredPacket =
+                                    #push_stored_packet{receiver = Receiver,
+                                                        timestamp = Timestamp,
+                                                        packet = Stanza},
+                                    mnesia:write(StoredPacket)
+                                end,
+                                StanzasToStore),
+                            WriteUser(Payload),
+                            do_dispatch(RegType, UserJid, NodeId, Payload);
+
+                        Payload ->
+                            WriteUser(Payload),
+                            do_dispatch(RegType, UserJid, NodeId, Payload)
+                    end
             end
     end.
+                                            
+%-------------------------------------------------------------------------
+
+-spec(do_dispatch/4 ::
+(
+    RegType :: reg_type(),
+    Receiver :: jid(),
+    NodeId :: binary(),
+    Payload :: payload())
+    -> dispatched | ok
+).
+
+do_dispatch({local_reg, _}, #jid{luser = LUser, lserver = LServer}, NodeId,
+            Payload) ->
+    MatchHeadReg =
+    #push_registration{id = {{LUser, LServer}, '_'},
+                       node = NodeId, _='_'},
+    SelectedReg =
+    mnesia:select(push_registration,
+                  [{MatchHeadReg, [], ['$_']}]),
+    case SelectedReg of
+        [] ->
+            ?INFO_MSG("push event for local user ~p, but user is not registered"
+                      " at local app server", []);
+        
+        [#push_registration{id = RegId,
+                            token = Token,
+                            app_id = AppId,
+                            backend_id = BackendId,
+                            silent_push = Silent,
+                            timestamp = Timestamp}] ->
+            ?DEBUG("++++ do_dispatch: found registration, dispatch locally", []),
+            dispatch_local(Payload, Token, AppId, BackendId,
+                           Silent, RegId, Timestamp, true)
+    end;
+
+do_dispatch({remote_reg, PubsubHost, Secret}, Receiver, NodeId, Payload) ->
+    ?DEBUG("++++ do_dispatch: dispatching remotely", []),
+    dispatch_remote(Receiver, PubsubHost, NodeId, Payload, Secret),
+    ok.
 
 %-------------------------------------------------------------------------
 
@@ -870,7 +912,9 @@ resend_packets(Jid) ->
     Packets = mnesia:read({push_stored_packet, LJid}),
     ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(LJid)]),
     lists:foreach(
-        fun(#push_stored_packet{sender = From, timestamp = T, packet = P}) ->
+        fun(#push_stored_packet{timestamp = T, packet = P}) ->
+	        FromS = proplists:get_value(<<"from">>, P#xmlel.attrs),
+            From = jlib:string_to_jid(FromS),
             StampedPacket = jlib:add_delay_info(P, Jid#jid.lserver, T),
             ejabberd_sm ! {route, From, Jid, StampedPacket}
         end,
@@ -943,27 +987,24 @@ on_affiliation_removal(_Jid, _From, _To, _) -> ok.
         
 %-------------------------------------------------------------------------
 
--spec(on_wait_for_resume/2 ::
+-spec(on_wait_for_resume/3 ::
 (
     Timeout :: integer(),
-    jid())
+    jid(),
+    UnackedStanzas :: [xmlelement()])
     -> integer()
 ).
 
-on_wait_for_resume(Timeout, #jid{luser = LUser, lserver = LServer, lresource = LResource}) ->
-    F = fun() ->
-        case mnesia:read({push_user, {LUser, LServer}}) of
-            [] -> Timeout;
-            [#push_user{subscriptions = Subscrs} = User] ->
-                NewSubscrs = set_pending(LResource, true, Subscrs),
-                mnesia:write(User#push_user{subscriptions = NewSubscrs}),
-                ?ADJUSTED_RESUME_TIMEOUT
-        end
-    end,
+on_wait_for_resume(Timeout, User, UnackedStanzas) ->
+    F = fun() -> dispatch(UnackedStanzas, User, true) end,
     case mnesia:transaction(F) of
-        {atomic, AdjustedTimeout} ->
-            ?DEBUG("+++++++ adjusting timeout to ~p", [AdjustedTimeout]),
-            AdjustedTimeout;
+        {atomic, not_subscribed} -> Timeout;
+
+        {atomic, ok} ->
+            ?DEBUG("+++++++ adjusting timeout to ~p",
+                   [?ADJUSTED_RESUME_TIMEOUT]),
+            ?ADJUSTED_RESUME_TIMEOUT;
+
         {aborted, Reason} ->
             ?DEBUG("+++++++ mod_push could not read timeout: ~p", [Reason]),
             Timeout
@@ -1962,70 +2003,88 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
 
 %-------------------------------------------------------------------------
 
--spec(make_payload/4 ::
+%% TODO: define more events (e.g. server_available)
+-spec(make_payload/3 ::
 (
-    From :: jid(),
-    Stanza :: xmlelement(),
+    Event :: {unacked_stanzas, [{erlang:timestamp(), xmlelement()}]},
     OldPayload :: payload(),
     Config :: user_config())
-    -> payload()
+    -> {payload(), [{erlang:timestamp(), xmlelement()}]} | payload() | none
 ).
 
-make_payload(error, _Stanza, _OldPayload, _Config) -> none;
-
-make_payload(From, Stanza, OldPayload,
+make_payload({unacked_stanzas, Stanzas}, StoredPayload,
              #user_config{include_senders = IncSenders,
                           include_message_count = IncMsgCount,
                           include_subscription_count = IncSubscrCount,
                           include_message_bodies = IncMsgBodies}) ->
-    FromS = jlib:jid_to_string(From),
-    KeyStore =
-    fun ({true, Key, Value}, Acc) -> lists:keystore(Key, 1, Acc, {Key, Value});
-        ({false, _, _}, Acc) -> Acc
-    end,
-    case Stanza of
-        #xmlel{name = <<"message">>, children = Children} ->
-            %% FIXME: Do we want to send push notifications on every message type?
-            %% FIXME: what about multiple body elements for different languages?
-            %% FIXME: max length of body's cdata?
-            BodyPred =
-            fun (#xmlel{name = <<"body">>}) -> true;
-                (_) -> false
-            end,
-            MsgBody = case lists:filter(BodyPred, Children) of
-                [] -> <<"">>;
-                [#xmlel{children = [{xmlcdata, CData}]}|_] -> CData
-            end,
-            OldMsgCount = proplists:get_value(message_count, OldPayload, 0),
-            MsgCount = case OldMsgCount of
-                ?MAX_INT -> 0; 
-                C when is_integer(C) -> C + 1
-            end,
-            lists:foldl(KeyStore, OldPayload,
-                        [{IncMsgCount, message_count, MsgCount},
-                         {IncSenders, last_message_sender, FromS},
-                         {IncMsgBodies, last_message_body, MsgBody}]);
-           
-       #xmlel{name = <<"presence">>, attrs = Attrs} -> 
-            case proplists:get_value(<<"type">>, Attrs) of
-                <<"subscribe">> ->
-                    OldSubscrCount =
-                    proplists:get_value(pending_subscription_count, OldPayload,
-                                        0),
-                    SubscrCount =
-                    case OldSubscrCount of
-                        ?MAX_INT -> 0;
-                        C when is_integer(C) -> C + 1
-                    end,
-                    lists:foldl(KeyStore, OldPayload,
-                                [{IncSubscrCount, pending_subscription_count,
-                                  SubscrCount},
-                                 {IncSenders, last_subscription_sender, FromS}]);
-                
-                _ -> none
-            end;
+    StanzaToPayload =
+    fun({_Timestamp, Stanza}, OldPayload) ->
+	    FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
+        KeyStore =
+        fun
+            ({true, Key, Value}, Acc) ->
+                lists:keystore(Key, 1, Acc, {Key, Value});
+            ({false, _, _}, Acc) -> Acc
+        end,
+        case Stanza of
+            #xmlel{name = <<"message">>, children = Children} ->
+                %% FIXME: Do we want to send push notifications on every message type?
+                %% FIXME: what about multiple body elements for different languages?
+                %% FIXME: max length of body's cdata?
+                BodyPred =
+                fun (#xmlel{name = <<"body">>}) -> true;
+                    (_) -> false
+                end,
+                MsgBody = case lists:filter(BodyPred, Children) of
+                    [] -> <<"">>;
+                    [#xmlel{children = [{xmlcdata, CData}]}|_] -> CData
+                end,
+                OldMsgCount = proplists:get_value(message_count, OldPayload, 0),
+                MsgCount = case OldMsgCount of
+                    ?MAX_INT -> 0; 
+                    C when is_integer(C) -> C + 1
+                end,
+                lists:foldl(KeyStore, OldPayload,
+                            [{IncMsgCount, message_count, MsgCount},
+                             {IncSenders, last_message_sender, FromS},
+                             {IncMsgBodies, last_message_body, MsgBody}]);
+               
+           #xmlel{name = <<"presence">>, attrs = Attrs} -> 
+                case proplists:get_value(<<"type">>, Attrs) of
+                    <<"subscribe">> ->
+                        OldSubscrCount =
+                        proplists:get_value(pending_subscription_count,
+                                            OldPayload, 0),
+                        SubscrCount =
+                        case OldSubscrCount of
+                            ?MAX_INT -> 0;
+                            C when is_integer(C) -> C + 1
+                        end,
+                        lists:foldl(KeyStore, OldPayload,
+                                    [{IncSubscrCount,
+                                      pending_subscription_count, SubscrCount},
+                                     {IncSenders, last_subscription_sender,
+                                      FromS}]);
+                    
+                    _ -> none
+                end;
 
-        _ -> none
+            _ -> none
+        end
+    end,
+    Payload =
+    lists:foldl(
+        fun(Stanza, {PayloadAcc, StanzasAcc}) ->
+            case StanzaToPayload(Stanza, PayloadAcc) of
+                none -> {PayloadAcc, StanzasAcc};
+                P -> {P, [Stanza|StanzasAcc]}
+            end
+        end,
+        {StoredPayload, []},
+        Stanzas),
+    case Payload of
+        {_, []} -> none;
+        _ -> Payload
     end.
 
 %-------------------------------------------------------------------------
