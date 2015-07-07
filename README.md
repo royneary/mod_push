@@ -29,10 +29,10 @@ ejabberdctl module_install mod_push
 ```
 
 ##Configuration
-###resume_timeout
-mod_push depends on stream management (XEP-0198) stream resumption. So the
-option 'resume_timeout' for module ejabberd_c2s in the listen-section of
-ejabberd.yml must be set to a value > 0 (default value is 300). This enables
+###stream management
+mod_push depends on stream management (XEP-0198) stream resumption. Clients are expected to close the TCP connection to the server without sending `</stream>` when they want to receive push notifications.
+The option `resume_timeout` for module ejabberd_c2s in the listen-section of
+ejabberd.yml must be set to a value greater than 0 (default value is 300). This enables
 stream resumption but the value has no effect on push users since mod_push
 overwrites this value to keep them pending for a long time.
 
@@ -93,7 +93,7 @@ servers too.
 ###Example configuration
 ```yaml
 mod_pubsub:
-  host : "push.myserver.net"
+  host : "push.example.net"
   nodetree : "virtual"
   plugins: 
     - "push"
