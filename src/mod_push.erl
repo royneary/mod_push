@@ -1,8 +1,7 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
-%%% Purpose : Send push notifications to client when stanza is stored
-%%%           for later delivery
+%%% Purpose : Send push notifications to clients in wait_for_resume state
 %%%           
 %%% Created : 22 Dec 2014 by Christian Ulrich <christian@rechenwerk.net>
 %%%
@@ -1018,15 +1017,16 @@ on_wait_for_resume(Timeout, User, UnackedStanzas) ->
     -> any()
 ).
 
-on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource}) ->
+on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource}
+                  = User) ->
     ?DEBUG("+++++++++++ on_resume_session", []),
     F = fun() ->
         case mnesia:read({push_user, {LUser, LServer}}) of
             [] -> ok;
-            [#push_user{subscriptions = Subscrs} = User] ->
+            [#push_user{subscriptions = Subscrs} = PushUser] ->
                 NewSubscrs = set_pending(LResource, false, Subscrs),
-                mnesia:write(User#push_user{payload = [],
-                                            subscriptions = NewSubscrs}),
+                mnesia:write(PushUser#push_user{payload = [],
+                                                subscriptions = NewSubscrs}),
                 mnesia:delete({push_stored_packet, jlib:jid_tolower(User)}) 
         end
     end,
