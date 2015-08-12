@@ -85,12 +85,13 @@ options() ->
      {subscribe, true},
      {access_model, whitelist},
      {roster_groups_allowed, []},
-     {publish_model, publish_only},
+     {publish_model, publishers},
      {notification_type, headline},
      {max_payload_size, ?MAX_PAYLOAD_SIZE},
      {send_last_published_item, never},
      {deliver_notifications, true},
-     {presence_based_delivery, false}].
+     {presence_based_delivery, false},
+     {secret, [<<"">>]}].
 
 features() ->
     [<<"create-nodes">>,
@@ -131,22 +132,41 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload, PubOpts) ->
     %% connected app server must use nodetree_tree and receives the items via
     %% XEP-0060 notification stanzas
     ?DEBUG("++++++ node_push:publish_item, node = ~p", [Nidx]),
-    VirtualNode = nodetree_virtual:get_node(Nidx),
-    [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
-    NodeId = VirtualNode#pubsub_node.nodeid,
-    Result =
-    ejabberd_hooks:run_fold(node_push_publish_item, Host, none,
-                            [NodeId, Payload, PubOpts]),
-    ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
-    case Result of
-        none ->
-            node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
-                                       ItemId, Payload, PubOpts);
-        ok -> {result, default};
-        bad_request -> {error, ?ERR_BAD_REQUEST};
-        node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
-        not_authorized -> {error, ?ERR_FORBIDDEN};
-        internal_server_error -> {error, ?ERR_INTERNAL_SERVER_ERROR}
+    case is_binary(Nidx) of
+        true ->
+            VirtualNode = nodetree_virtual:get_node(Nidx),
+            [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
+            NodeId = VirtualNode#pubsub_node.nodeid,
+            Result =
+            ejabberd_hooks:run_fold(node_push_publish_item, Host,
+                                    internal_server_error,
+                                    [NodeId, Payload, PubOpts]),
+            ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
+            case Result of
+                ok -> {result, default};
+                bad_request -> {error, ?ERR_BAD_REQUEST};
+                node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
+                not_authorized -> {error, ?ERR_FORBIDDEN};
+                internal_server_error -> {error, ?ERR_INTERNAL_SERVER_ERROR}
+            end;
+
+        false ->
+            #pubsub_node{options = Options} = nodetree_tree:get_node(Nidx),
+            ?DEBUG("+++++ Node options = ~p", [Options]),
+            Secret = proplists:get_value(secret, Options, <<"">>),
+            case mod_push:check_secret(Secret, PubOpts) of
+                true ->
+                    ?DEBUG("+++++ right secret!", []),
+                    Result =
+                    node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
+                                               ItemId, Payload, PubOpts),
+                    ?DEBUG("+++++ node_hometree:publish_item returned ~p",
+                           [Result]),
+                    Result;
+                false ->
+                    ?DEBUG("++++++ wrong secret, should be ~p", [Secret]),
+                    {error, ?ERR_FORBIDDEN}
+            end
     end.
     
 remove_extra_items(Nidx, MaxItems, ItemIds) ->
