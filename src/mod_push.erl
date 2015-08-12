@@ -52,7 +52,8 @@
          on_disco_pubsub_info/5,
          on_disco_reg_identity/5,
          process_adhoc_command/4,
-         unregister_client/2]).
+         unregister_client/2,
+         check_secret/2]).
 
 -include("logger.hrl").
 -include("jlib.hrl").
@@ -840,7 +841,7 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
 dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
     MakeKey =
     fun(Atom) ->
-        binary:replace(atom_to_binary(Atom, utf8), <<"_">>, <<"-">>)
+        binary:replace(atom_to_binary(Atom, utf8), <<"_">>, <<"-">>, [global])
     end,
     Fields =
     lists:foldl(
@@ -880,7 +881,7 @@ dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
                         children =
                         [#xmlel{name = <<"item">>,
                                 children = [Notification]}]}] ++ PubOpts}]},
-    ejabberd_router:route(User, PubsubJid, Iq).
+    ejabberd_router:route(jlib:jid_remove_resource(User), PubsubJid, Iq).
 
 %-------------------------------------------------------------------------
 
@@ -1160,6 +1161,7 @@ add_backends(Host, Opts) ->
                            []),
     case parse_backends(BackendOpts, Host, CertFile, []) of
         invalid -> error;
+        [] -> ok;
         Parsed ->
             lists:foreach(
                 fun({B, _}) ->
