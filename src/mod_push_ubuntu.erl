@@ -71,7 +71,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, AppId, _Silent, DisableArgs},
+handle_cast({dispatch, Payload, Token, AppId, DisableArgs},
             #state{certfile = CertFile,
                    too_many_pending = TooManyPending} = State) ->
     % TODO: right now the clear_pending field is set if server replied with a

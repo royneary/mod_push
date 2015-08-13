@@ -70,7 +70,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, _AppId, _Silent, DisableArgs},
+handle_cast({dispatch, Payload, Token, _AppId, DisableArgs},
             #state{certfile = CertFile, api_key = ApiKey} = State) ->
     ?DEBUG("+++++ Sending push notification to ~p", [?PUSH_URL]),
     PushMessage =

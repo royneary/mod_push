@@ -71,7 +71,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, _AppId, _Silent, DisableArgs},
+handle_cast({dispatch, Payload, Token, _AppId, DisableArgs},
             #state{certfile = CertFile,
                    version = Version} = State) ->
     Url = ?PUSH_URL ++ binary_to_list(Token),

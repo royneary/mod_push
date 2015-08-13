@@ -89,7 +89,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %% TODO: store {MessageId, DisableCb} tuples and handle invalid-token
 %% error messages
-handle_cast({dispatch, Payload, Token, _AppId, _Silent, DisableArgs},
+handle_cast({dispatch, Payload, Token, _AppId, DisableArgs},
             #state{certfile = CertFile, out_socket = OutSocket} = State) ->
     ?DEBUG("+++++ Sending push notification to ~p", [?PUSH_URL]),
     Socket = case OutSocket of

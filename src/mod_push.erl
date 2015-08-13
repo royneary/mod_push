@@ -153,7 +153,6 @@
                             secret :: binary(),
                             app_id :: binary(),
                             backend_id :: integer(),
-                            silent_push :: boolean(),
                             timestamp = now() :: erlang:timestamp()}).
 
 %% mnesia table
@@ -190,7 +189,7 @@
 
 %-------------------------------------------------------------------------
 
--spec(register_client/8 ::
+-spec(register_client/7 ::
 (
     User :: jid(),
     RegisterHost :: binary(),
@@ -198,25 +197,23 @@
     Token :: binary(),
     DeviceId :: binary(),
     DeviceName :: binary(),
-    AppId :: binary(),
-    Silent :: boolean())
+    AppId :: binary())
     -> {registered,
         PubsubHost :: binary(),
         Node :: binary(),
         Secret :: binary()}
 ).
 
-register_client(#jid{lresource = <<"">>}, _, _, _, <<"">>, _, _, _) ->
+register_client(#jid{lresource = <<"">>}, _, _, _, <<"">>, _, _) ->
     error;
 
-register_client(#jid{lresource = <<"">>}, _, _, _, undefined, _, _, _) ->
+register_client(#jid{lresource = <<"">>}, _, _, _, undefined, _, _) ->
     error;
 
 register_client(#jid{luser = LUser,
                      lserver = LServer,
                      lresource = LResource},
-                RegisterHost, Type, Token, DeviceId, DeviceName, AppId,
-                Silent) ->
+                RegisterHost, Type, Token, DeviceId, DeviceName, AppId) ->
     F = fun() ->
         MatchHeadBackend =
         #push_backend{register_host = RegisterHost, type = Type, _='_'},
@@ -246,8 +243,7 @@ register_client(#jid{luser = LUser,
                                            token = Token,
                                            secret = Secret,
                                            app_id = AppId,
-                                           backend_id = BackendId,
-                                           silent_push = Silent};
+                                           backend_id = BackendId};
 
                     [OldReg] ->
                         OldReg#push_registration{device_name = DeviceName,
@@ -255,7 +251,6 @@ register_client(#jid{luser = LUser,
                                                  secret = Secret,
                                                  app_id = AppId,
                                                  backend_id = BackendId,
-                                                 silent_push = Silent,
                                                  timestamp = now()}
                 end,
                 mnesia:write(Registration),
@@ -770,11 +765,10 @@ do_dispatch({local_reg, _}, #jid{luser = LUser, lserver = LServer}, NodeId,
                             token = Token,
                             app_id = AppId,
                             backend_id = BackendId,
-                            silent_push = Silent,
                             timestamp = Timestamp}] ->
             ?DEBUG("++++ do_dispatch: found registration, dispatch locally", []),
-            dispatch_local(Payload, Token, AppId, BackendId,
-                           Silent, RegId, Timestamp, true)
+            dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
+                           true)
     end;
 
 do_dispatch({remote_reg, PubsubHost, Secret}, Receiver, NodeId, Payload) ->
@@ -784,20 +778,19 @@ do_dispatch({remote_reg, PubsubHost, Secret}, Receiver, NodeId, Payload) ->
 
 %-------------------------------------------------------------------------
 
--spec(dispatch_local/8 ::
+-spec(dispatch_local/7 ::
 (
     Payload :: payload(),
     Token :: binary(),
     AppId :: binary(),
     BackendId :: integer(),
-    Silent :: boolean(),
     RegId :: {bare_jid(), device_id()},
     Timestamp :: erlang:timestamp(),
     AllowRelay :: boolean())
     -> ok
 ).
 
-dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
+dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
                AllowRelay) ->
     DisableArgs = {RegId, Timestamp},
     [#push_backend{worker = Worker, cluster_nodes = ClusterNodes}] =
@@ -806,8 +799,7 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
         true ->
             ?DEBUG("+++++ dispatch_local: calling worker", []),
             gen_server:cast(Worker,
-                            {dispatch,
-                             Payload, Token, AppId, Silent, DisableArgs});
+                            {dispatch, Payload, Token, AppId, DisableArgs});
 
         false ->
             case AllowRelay of
@@ -822,7 +814,7 @@ dispatch_local(Payload, Token, AppId, BackendId, Silent, RegId, Timestamp,
                     gen_server:cast(
                         {Worker, ChosenNode},
                         {dispatch,
-                         Payload, Token, AppId, Silent, DisableArgs})
+                         Payload, Token, AppId, DisableArgs})
             end
     end.
            
@@ -1055,13 +1047,12 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                            secret = Secret,
                            app_id = AppId,
                            backend_id = BackendId,
-                           silent_push = Silent,
                            timestamp = Timestamp}) ->
         case check_secret(Secret, PubOpts) of
             true ->
                 case get_xdata_elements(Children) of
                    [] ->
-                       dispatch_local([], Token, AppId, BackendId, Silent, RegId,
+                       dispatch_local([], Token, AppId, BackendId, RegId,
                                       Timestamp, false);
 
                     XDataForms ->
@@ -1097,7 +1088,7 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                                      {pending_subscription_count, SubscrCount},
                                      {last_subscription_sender, SubscrSender}]),
                                 dispatch_local(Payload, Token, AppId, BackendId,
-                                               Silent, RegId, Timestamp, false);
+                                               RegId, Timestamp, false);
                              Err ->
                                 ?DEBUG("+++++ parse_form returned ~p", [Err]),
                                 ?INFO_MSG("Cancel dispatching push "
@@ -1313,8 +1304,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
 
                         Token ->
                             register_client(From, LServer, apns, Token,
-                                            DeviceId, DeviceName, <<"">>,
-                                            undefined)
+                                            DeviceId, DeviceName, <<"">>)
                     end;
 
                 _ -> error
@@ -1329,7 +1319,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             case Parsed of
                 {result, [Token, DeviceId, DeviceName]} ->
                     register_client(From, LServer, gcm, Token, DeviceId,
-                                    DeviceName, <<"">>, undefined);
+                                    DeviceName, <<"">>);
 
                 _ -> error
             end;
@@ -1343,7 +1333,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             case Parsed of
                 {result, [Token, DeviceId, DeviceName]} ->
                     register_client(From, LServer, mozilla, Token, DeviceId,
-                                    DeviceName, <<"">>, undefined);
+                                    DeviceName, <<"">>);
 
                 _ -> error
             end;
@@ -1358,7 +1348,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             case Parsed of
                 {result, [Token, AppId, DeviceId, DeviceName]} ->
                     register_client(From, LServer, ubuntu, Token,
-                                    DeviceId, DeviceName, AppId, undefined);
+                                    DeviceId, DeviceName, AppId);
                 
                 _ -> error
             end;
@@ -1372,7 +1362,7 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
             case Parsed of
                 {result, [Token, DeviceId, DeviceName]} ->
                     register_client(From, LServer, wns, Token, DeviceId,
-                                    DeviceName, <<"">>, undefined);
+                                    DeviceName, <<"">>);
 
                 _ -> error
             end;

@@ -81,7 +81,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, ChannelUrl, _AppId, _Silent, DisableArgs},
+handle_cast({dispatch, Payload, ChannelUrl, _AppId, DisableArgs},
             #state{certfile = CertFile, access_token = AccessToken} = State) ->
     case is_list(AccessToken) of
         false ->
