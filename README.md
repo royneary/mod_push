@@ -38,8 +38,8 @@ overwrites this value to keep them pending for a long time.
 
 ###pubsub configuration
 An XEP-0357 app server requires a pubsub service where XMPP servers can publish
-notifications. The pubsub service needs a dedicated host with a virtual nodetree and the
-'push' plugin:
+notifications. The pubsub service needs a dedicated hostname.
+If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual" must be set.` The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
 ```yaml
 mod_pubsub:
   host : "push.example.net"
@@ -113,8 +113,6 @@ servers too.
 * `package_sid`: the package SID obtained from Microsoft Developer Center
 
 ###Example configuration
-If the internal app server shall be used, that is option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. It can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
-
 ```yaml
 mod_pubsub:
   host : "push.example.net"
