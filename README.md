@@ -69,6 +69,28 @@ mod_push:
   include_subscription_count: true
 ```
 
+Users can set their configuration by including a form of `FORM_TYPE` "urn:xmpp:push:options" into the enable request. Note that this configuration is a per-user configuration that is valid for all resources. To send publish-options which are passed to the pubsub-service when publishing a notification an other form of `FORM_TYPE` "http://jabber.org/protocol/pubsub#publish-options" can be included. In this example it contains a secret a pubsub service might require as credential. mod_push's internal app server does require providing the secret obtained during registration.
+
+```xml
+<iq type='set' to='example.net' id='x42'>                                                
+  <enable xmlns='urn:xmpp:push:0' jid='push.example.net' node='v9S+H8VTFgEl'>
+    <x xmlns='jabber:x:data' type='submit'>
+      <field var='FORM_TYPE'><value>urn:xmpp:push:options</value></field>
+      <field var='include-senders'><value>0</value></field>
+      <field var='include-message-count'><value>1</value></field>
+      <field var='include-message-bodies'><value>0</value></field>
+      <field var='include-subscription-count'><value>1</value></field>
+    </x>
+    <x xmlns='jabber:x:data' type='submit'>
+      <field var='FORM_TYPE'><value>http://jabber.org/protocol/pubsub#publish-options</value></field>
+      <field var='secret'><value>szLo+l17Q0ZQr2dShnyQiYn/stqicShK</value></field>
+    </x>
+  </enable>                      
+</iq>
+```
+
+mod_push provides in-band configuration although not recommended by XEP-0357. In order to prevent privilege escalation as mentioned in the XEP subsequent enable requests are only allowed to disable options, not enable them. A fresh configuration is only possible after all push-enabled resources have been disabled.
+
 ###App server configuration
 You can set up multiple app server backends for the different push
 notification services. This is not required, your users can use external app
@@ -91,6 +113,8 @@ servers too.
 * `package_sid`: the package SID obtained from Microsoft Developer Center
 
 ###Example configuration
+If the internal app server shall be used, that is option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. It can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
+
 ```yaml
 mod_pubsub:
   host : "push.example.net"
@@ -155,7 +179,6 @@ There are common fields which a client has to include for every backend type and
 
 ###register-push-apns fields
 * `token`: the base64-encoded binary token obtained from APNS
-* `silent-push`: when set to true content-available will be set to 1, default vaule: false
 
 ###register-push-ubuntu fields
 * `application-id`: the app id as registered at Ubuntu's push service
@@ -168,7 +191,7 @@ There are common fields which a client has to include for every backend type and
 * `nodes`: a list of node names; registrations mathing one of them will be removed
 
 ###register command response
-The app server returns the jid of the pubsub host and a pubsub node name. The client can pass those to its XMPP server in the XEP-0357 enable request.
+The app server returns the jid of the pubsub host a pubsub node name and a secret. The client can pass those to its XMPP server in the XEP-0357 enable request.
 Example:
 ```xml
 <iq from='example.net' to='steve@example.net/home' id='exec1' type='result'>
@@ -179,6 +202,9 @@ Example:
       </field>
       <field var='node'>
         <value>2100994384</value>
+      </field>
+      <field var='secret'>
+        <value>C46JMRFNEixmP1c5lXEUaIGKGVy-sv81</value>
       </field>
     </x>
   </command>
@@ -198,4 +224,24 @@ Example:
     </x>
   </command>
 </iq>
+```
+
+###list registrations
+A list of a user's push-enabled clients can be obtained using the `list-push-registrations` command. This might be important if a push client shall be unregistered without having access to the device anymore. If a client provided a `device-name` value during registration it is included in the response along with the node name.
+```xml
+<iq from='example.net' to='bill@example.net/home' id='exec1' type='result'>
+  <command xmlns='http://jabber.org/protocol/commands' sessionid='2015-08-13T16:10:02.489807Z' node='list-push-registrations' status='completed'>
+    <x xmlns='jabber:x:data' type='result'>
+      <item>
+        <field var='device-name'><value>iOS device</value></field>
+        <field var='node'><value>2269691389</value></field>
+      </item>
+      <item>
+        <field var='device-name'><value>Ubuntu device</value></field>
+        <field var='node'><value>2393247634</value></field>
+      </item>
+    </x>
+  </command>
+</iq>
+
 ```
