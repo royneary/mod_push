@@ -39,7 +39,7 @@ overwrites this value to keep them pending for a long time.
 ###pubsub configuration
 An XEP-0357 app server requires a pubsub service where XMPP servers can publish
 notifications. The pubsub service needs a dedicated hostname.
-If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual" must be set.` The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
+If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual"` must be set.` The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
 ```yaml
 mod_pubsub:
   host : "push.example.net"
@@ -69,7 +69,7 @@ mod_push:
   include_subscription_count: true
 ```
 
-Users can set their configuration by including a form of `FORM_TYPE` "urn:xmpp:push:options" into the enable request. Note that this configuration is a per-user configuration that is valid for all resources. To send publish-options which are passed to the pubsub-service when publishing a notification an other form of `FORM_TYPE` "http://jabber.org/protocol/pubsub#publish-options" can be included. In this example it contains a secret a pubsub service might require as credential. mod_push's internal app server does require providing the secret obtained during registration.
+Users can set their configuration by including a form of `FORM_TYPE` `urn:xmpp:push:options` into the enable request. Note that this configuration is a per-user configuration that is valid for all resources. To send publish-options which are passed to the pubsub-service when publishing a notification an other form of `FORM_TYPE` `http://jabber.org/protocol/pubsub#publish-options` can be included. In this example it contains a secret a pubsub service might require as credential. mod_push's internal app server does require providing the secret obtained during registration.
 
 ```xml
 <iq type='set' to='example.net' id='x42'>                                                
