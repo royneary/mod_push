@@ -122,11 +122,11 @@
 
 %-------------------------------------------------------------------------
 
--record(user_config,
-        {include_senders :: boolean(),
-         include_message_count :: boolean(),
-         include_subscription_count :: boolean(),
-         include_message_bodies :: boolean()}).
+%-record(user_config,
+%        {include_senders :: boolean(),
+%         include_message_count :: boolean(),
+%         include_subscription_count :: boolean(),
+%         include_message_bodies :: boolean()}).
 
 -record(auth_data,
         {auth_key = <<"">> :: binary(),
@@ -176,8 +176,8 @@
 -type bare_jid() :: {binary(), binary()}.
 -type device_id() :: binary().
 -type payload_key() ::
-    last_message_sender | last_subscription_sender | message_count |
-    pending_subscription_count | last_message_body.
+    'last-message-sender' | 'last-subscription-sender' | 'message-count' |
+    'pending-subscription-count' | 'last-message-body'.
 -type payload_value() :: binary() | integer().
 -type payload() :: [{payload_key(), payload_value()}].
 -type push_backend() :: #push_backend{}.
@@ -185,7 +185,11 @@
 -type reg_type() :: {local_reg, binary()} | % pubsub host
                     {remote_reg, jid(), binary()}.  % pubsub host, secret
 -type subscription() :: #subscription{}.
--type user_config() :: #user_config{}.
+%-type user_config() :: #user_config{}.
+-type user_config_option() ::
+    'include-senders' | 'include-message-count' | 'include-subscription-count' |
+    'include-message-bodies'.
+-type user_config() :: [user_config_option()].
 
 %-------------------------------------------------------------------------
 
@@ -469,7 +473,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                         GConfig = get_global_config(LServer),
                         case make_config(XDataForms, GConfig, enable_disable) of
                             error -> error;
-                            {Config, ResponseForm} ->
+                            {Config, ChangedOpts} ->
                                 %% NewUser will have empty payload
                                 NewUser =
                                 #push_user{bare_jid = {LUser, LServer},
@@ -477,14 +481,14 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                                            config = Config},
                                 mnesia:write(NewUser),
                                 resend_packets(UserJid),
-                                ResponseForm
+                                make_config_form(ChangedOpts)
                         end;
                     
                     [#push_user{subscriptions = Subscriptions,
                                 config = OldConfig}] ->
                         case make_config(XDataForms, OldConfig, disable_only) of
                             error -> error;
-                            {Config, ResponseForm} -> 
+                            {Config, ChangedOpts} -> 
                                 FilterNode =
                                 fun
                                     (S) when S#subscription.node =:= Node;
@@ -501,12 +505,14 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                                            config = Config},
                                 mnesia:write(NewUser),
                                 resend_packets(UserJid),
-                                ResponseForm
+                                make_config_form(ChangedOpts)
                         end
                 end
             end,
             case mnesia:transaction(F) of
-                {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
+                {aborted, Reason} ->
+                    ?DEBUG("+++++ enable transaction aborted: ~p", [Reason]),
+                    {error, ?ERR_INTERNAL_SERVER_ERROR};
                 {atomic, error} -> {error, ?ERR_NOT_ACCEPTABLE};
                 {atomic, []} -> {enabled, ok};
                 {atomic, ResponseForm} -> {enabled, ResponseForm}
@@ -831,10 +837,7 @@ dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
 ).
 
 dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
-    MakeKey =
-    fun(Atom) ->
-        binary:replace(atom_to_binary(Atom, utf8), <<"_">>, <<"-">>, [global])
-    end,
+    MakeKey = fun(Atom) -> atom_to_binary(Atom, utf8) end,
     Fields =
     lists:foldl(
         fun
@@ -1082,11 +1085,11 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                                         end
                                     end,
                                     [],
-                                    [{message_count, MsgCount},
-                                     {last_message_sender, MsgSender},
-                                     {last_message_body, MsgBody},
-                                     {pending_subscription_count, SubscrCount},
-                                     {last_subscription_sender, SubscrSender}]),
+                                    [{'message-count', MsgCount},
+                                     {'last-message-sender', MsgSender},
+                                     {'last-message-body', MsgBody},
+                                     {'pending-subscription-count', SubscrCount},
+                                     {'last-subscription-sender', SubscrSender}]),
                                 dispatch_local(Payload, Token, AppId, BackendId,
                                                RegId, Timestamp, false);
                              Err ->
@@ -1487,9 +1490,9 @@ process_iq(From, _To, #iq{type = Type, sub_el = SubEl} = IQ) ->
                                 {enabled, ok} ->
                                     IQ#iq{type = result, sub_el = []};
 
-                                {enabled, ResponseChildren} -> 
+                                {enabled, ResponseForm} -> 
                                     NewSubEl =
-                                    SubEl#xmlel{children = ResponseChildren},
+                                    SubEl#xmlel{children = ResponseForm},
                                     IQ#iq{type = result, sub_el = [NewSubEl]};
 
                                 {error, Error} ->
@@ -1628,16 +1631,6 @@ on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
 on_disco_reg_identity(Acc, _From, _To, _Node, _Lang) ->
     Acc.
                
-% FIXME: hook disco_sm_info is not implemented yet!
-%on_disco_sm_info(Acc, From, To, Node, Lang) ->
-%    % TODO:
-%    % <x xmlns='jabber:x:data'>
-%    %   <field var='include-bodies'><value>0<value></field>
-%    %   <field var='include-senders'><value>0<value></field>
-%    %   <field var='include-message-count'><value>1<value></field>
-%    % </x>
-%    Acc.
-
 %-------------------------------------------------------------------------
 % gen_mod callbacks
 %-------------------------------------------------------------------------
@@ -1789,40 +1782,54 @@ stop(Host) ->
 -spec(get_global_config/1 :: (Host :: binary()) -> user_config()).
 
 get_global_config(Host) ->
-   #user_config{
-        include_senders =
-        gen_mod:get_module_opt(Host, ?MODULE, include_senders,
-                               fun(B) when is_boolean(B) -> B end,
-                               ?INCLUDE_SENDERS_DEFAULT),
-        include_message_count =
-        gen_mod:get_module_opt(Host, ?MODULE, include_message_count,
-                               fun(B) when is_boolean(B) -> B end,
-                               ?INCLUDE_MSG_COUNT_DEFAULT),
-        include_subscription_count =
-        gen_mod:get_module_opt(Host, ?MODULE, include_subscription_count,
-                               fun(B) when is_boolean(B) -> B end,
-                        ?INCLUDE_SUBSCR_COUNT_DEFAULT),
-        include_message_bodies =
-        gen_mod:get_module_opt(Host, ?MODULE, include_message_bodies,
-                               fun(B) when is_boolean(B) -> B end,
-                               ?INCLUDE_MSG_BODIES_DEFAULT)}.
+    [{'include-senders',
+      gen_mod:get_module_opt(Host, ?MODULE, include_senders,
+                             fun(B) when is_boolean(B) -> B end,
+                             ?INCLUDE_SENDERS_DEFAULT)},
+     {'include-message-count',
+      gen_mod:get_module_opt(Host, ?MODULE, include_message_count,
+                             fun(B) when is_boolean(B) -> B end,
+                             ?INCLUDE_MSG_COUNT_DEFAULT)},
+     {'include-subscription-count',
+      gen_mod:get_module_opt(Host, ?MODULE, include_subscription_count,
+                             fun(B) when is_boolean(B) -> B end,
+                             ?INCLUDE_SUBSCR_COUNT_DEFAULT)},
+     {'include-message-bodies',
+      gen_mod:get_module_opt(Host, ?MODULE, include_message_bodies,
+                             fun(B) when is_boolean(B) -> B end,
+                             ?INCLUDE_MSG_BODIES_DEFAULT)}].
+
+
+
+   %#user_config{
+   %     include_senders =
+   %     gen_mod:get_module_opt(Host, ?MODULE, include_senders,
+   %                            fun(B) when is_boolean(B) -> B end,
+   %                            ?INCLUDE_SENDERS_DEFAULT),
+   %     include_message_count =
+   %     gen_mod:get_module_opt(Host, ?MODULE, include_message_count,
+   %                            fun(B) when is_boolean(B) -> B end,
+   %                            ?INCLUDE_MSG_COUNT_DEFAULT),
+   %     include_subscription_count =
+   %     gen_mod:get_module_opt(Host, ?MODULE, include_subscription_count,
+   %                            fun(B) when is_boolean(B) -> B end,
+   %                     ?INCLUDE_SUBSCR_COUNT_DEFAULT),
+   %     include_message_bodies =
+   %     gen_mod:get_module_opt(Host, ?MODULE, include_message_bodies,
+   %                            fun(B) when is_boolean(B) -> B end,
+   %                            ?INCLUDE_MSG_BODIES_DEFAULT)}.
 
 %-------------------------------------------------------------------------
 
 -spec(make_config/3 ::
 (
     XDataForms :: [xmlelement()],
-    DefConfig :: user_config(),
+    OldConfig :: user_config(),
     ConfigPrivilege :: disable_only | enable_disable)
-    -> {user_config(), [xmlelement()]}
+    -> {user_config(), user_config()}
 ).
 
-make_config(XDataForms,
-            #user_config{include_senders = DefIncSenders,
-                         include_message_count = DefIncMsgCount,
-                         include_subscription_count = DefIncSubscrCount,
-                         include_message_bodies = DefIncMsgBodies} = DefConfig,
-            ConfigPrivilege) ->
+make_config(XDataForms, OldConfig, ConfigPrivilege) ->
     %% if a user is allowed to change an option from OldValue to NewValue,
     %% OptionAllowed(OldValue, NewValue) returns true
     OptionAllowed = case ConfigPrivilege of
@@ -1838,88 +1845,143 @@ make_config(XDataForms,
             end
     end,
     AllowedOpts =
-    [<<"include-senders">>, <<"include-message-count">>,
-     <<"include-subscription-count">>, <<"include-message-bodies">>],
+    ['include-senders', 'include-message-count', 'include-subscription-count',
+     'include-message-bodies'],
     OptionalFields =
     lists:map(
-        fun(F) -> {{single, F},
-                   fun(B) -> binary_to_boolean(B, undefined) end}
+        fun(Opt) -> {{single, atom_to_binary(Opt, utf8)},
+                     fun(B) -> {Opt, binary_to_boolean(B, undefined)} end}
         end,
         AllowedOpts),
     ParseResult = parse_form(XDataForms, ?NS_PUSH_OPTIONS, [], OptionalFields),
     case ParseResult of
         error -> error;
+        
+        not_found -> {OldConfig, []};
 
-        not_found -> {DefConfig, []};
-
-        {result, ParsedTupleList} ->
-            AnyError = lists:any(
+        {result, ParsedOptions} ->
+            AnyError =
+            lists:any(
                 fun
                     (error) -> true;
                     (_) -> false
                 end,
-                ParsedTupleList),
+                ParsedOptions),
             case AnyError of
-                true ->
-                    error;
+                true -> error;
 
                 false ->
-                    [IncSenders, IncMsgCount, IncSubscrCount, IncMsgBodies] =
-                    ParsedTupleList,
-                    Config =
-                    #user_config{
-                        include_senders =
-                        case OptionAllowed(DefIncSenders, IncSenders) of
-                            true -> IncSenders;
-                            false -> DefIncSenders
+                    lists:foldl(
+                        fun({Key, Value}, {ConfigAcc, ChangedOptsAcc}) ->
+                            OldValue = proplists:get_value(Key, OldConfig),
+                            ChangeOpt =
+                            is_boolean(Value) and OptionAllowed(OldValue, Value),
+                            case ChangeOpt of
+                                true ->
+                                    {[{Key, Value}|ConfigAcc],
+                                     [{Key, Value}|ChangedOptsAcc]};
+                                false ->
+                                    {[{Key, OldValue}|ConfigAcc],
+                                     ChangedOptsAcc}
+                            end
                         end,
-                        include_message_count =
-                        case OptionAllowed(DefIncMsgCount, IncMsgCount) of
-                            true -> IncMsgCount;
-                            false -> DefIncMsgCount
-                        end,
-                        include_subscription_count =
-                        case OptionAllowed(DefIncSubscrCount, IncSubscrCount) of
-                            true -> IncSubscrCount;
-                            false -> DefIncSubscrCount
-                        end,
-                        include_message_bodies =
-                        case OptionAllowed(DefIncMsgBodies, IncMsgBodies) of
-                            true -> IncMsgBodies;
-                            false -> DefIncMsgBodies
-                        end},
-                        ChangedOptsFields =
-                        lists:filtermap(
-                            fun({Opt, OldValue, NewValue}) ->
-                               case OptionAllowed(OldValue, NewValue) of
-                                    true ->
-                                        {true,
-                                         ?TVFIELD(<<"boolean">>, Opt,
-                                                  [boolean_to_binary(NewValue)])};
-                                    false -> false
-                                end
-                            end,
-                            lists:zip3(
-                                AllowedOpts,
-                                [DefIncSenders, DefIncMsgCount,
-                                 DefIncSubscrCount, DefIncMsgBodies],
-                                ParsedTupleList)),
-                        ?DEBUG("+++++ ChangedOptsFields = ~p", [ChangedOptsFields]),
-                        ?DEBUG("+++++ Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
-                        ResponseForm = case ChangedOptsFields of
-                            [] -> [];
-                            _ ->
-                                [#xmlel{
-                                    name = <<"x">>,
-                                    attrs = [{<<"xmlns">>, ?NS_XDATA},
-                                             {<<"type">>, <<"result">>}],
-                                    children =
-                                    [?HFIELD(?NS_PUSH_OPTIONS)|
-                                     ChangedOptsFields]}]
-                        end,
-                        {Config, ResponseForm}
+                        {[], []},
+                        ParsedOptions)
             end
     end.
+                    
+
+
+    
+
+
+    %[<<"include-senders">>, <<"include-message-count">>,
+    % <<"include-subscription-count">>, <<"include-message-bodies">>],
+    %OptionalFields =
+    %lists:map(
+    %    fun(F) -> {{single, F},
+    %               fun(B) -> binary_to_boolean(B, undefined) end}
+    %    end,
+    %    AllowedOpts),
+    %ParseResult = parse_form(XDataForms, ?NS_PUSH_OPTIONS, [], OptionalFields),
+    %case ParseResult of
+    %    error -> error;
+
+    %    not_found -> {DefConfig, []};
+
+    %    {result, ParsedTupleList} ->
+    %        AnyError = lists:any(
+    %            fun
+    %                (error) -> true;
+    %                (_) -> false
+    %            end,
+    %            ParsedTupleList),
+    %        case AnyError of
+    %            true ->
+    %                error;
+
+    %            false ->
+    %                [IncSenders, IncMsgCount, IncSubscrCount, IncMsgBodies] =
+    %                ParsedTupleList,
+    %                Config =
+    %                #user_config{
+    %                    include_senders =
+    %                    case OptionAllowed(DefIncSenders, IncSenders) of
+    %                        true -> IncSenders;
+    %                        false -> DefIncSenders
+    %                    end,
+    %                    include_message_count =
+    %                    case OptionAllowed(DefIncMsgCount, IncMsgCount) of
+    %                        true -> IncMsgCount;
+    %                        false -> DefIncMsgCount
+    %                    end,
+    %                    include_subscription_count =
+    %                    case OptionAllowed(DefIncSubscrCount, IncSubscrCount) of
+    %                        true -> IncSubscrCount;
+    %                        false -> DefIncSubscrCount
+    %                    end,
+    %                    include_message_bodies =
+    %                    case OptionAllowed(DefIncMsgBodies, IncMsgBodies) of
+    %                        true -> IncMsgBodies;
+    %                        false -> DefIncMsgBodies
+    %                    end},
+    %                    ChangedOpts =
+    %                    
+
+
+
+    %                    ChangedOptsFields =
+    %                    lists:filtermap(
+    %                        fun({Opt, OldValue, NewValue}) ->
+    %                           case OptionAllowed(OldValue, NewValue) of
+    %                                true ->
+    %                                    {true,
+    %                                     ?TVFIELD(<<"boolean">>, Opt,
+    %                                              [boolean_to_binary(NewValue)])};
+    %                                false -> false
+    %                            end
+    %                        end,
+    %                        lists:zip3(
+    %                            AllowedOpts,
+    %                            [DefIncSenders, DefIncMsgCount,
+    %                             DefIncSubscrCount, DefIncMsgBodies],
+    %                            ParsedTupleList)),
+    %                    ?DEBUG("+++++ ChangedOptsFields = ~p", [ChangedOptsFields]),
+    %                    ?DEBUG("+++++ Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
+    %                    ResponseForm = case ChangedOptsFields of
+    %                        [] -> [];
+    %                        _ ->
+    %                            [#xmlel{
+    %                                name = <<"x">>,
+    %                                attrs = [{<<"xmlns">>, ?NS_XDATA},
+    %                                         {<<"type">>, <<"result">>}],
+    %                                children =
+    %                                [?HFIELD(?NS_PUSH_OPTIONS)|
+    %                                 ChangedOptsFields]}]
+    %                    end,
+    %                    {Config, ResponseForm}
+    %        end
+    %end.
 
 %-------------------------------------------------------------------------
 
@@ -2004,19 +2066,16 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
     -> {payload(), [{erlang:timestamp(), xmlelement()}]} | payload() | none
 ).
 
-make_payload({unacked_stanzas, Stanzas}, StoredPayload,
-             #user_config{include_senders = IncSenders,
-                          include_message_count = IncMsgCount,
-                          include_subscription_count = IncSubscrCount,
-                          include_message_bodies = IncMsgBodies}) ->
+make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
     StanzaToPayload =
     fun({_Timestamp, Stanza}, OldPayload) ->
 	    FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
         KeyStore =
-        fun
-            ({true, Key, Value}, Acc) ->
-                lists:keystore(Key, 1, Acc, {Key, Value});
-            ({false, _, _}, Acc) -> Acc
+        fun({Opt, Key, Value}, Acc) ->
+            case proplists:get_value(Opt, Config) of
+                true -> lists:keystore(Key, 1, Acc, {Key, Value});
+                false -> Acc
+            end
         end,
         case Stanza of
             #xmlel{name = <<"message">>, children = Children} ->
@@ -2031,32 +2090,43 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload,
                     [] -> <<"">>;
                     [#xmlel{children = [{xmlcdata, CData}]}|_] -> CData
                 end,
-                OldMsgCount = proplists:get_value(message_count, OldPayload, 0),
+                OldMsgCount = proplists:get_value('message-count', OldPayload, 0),
                 MsgCount = case OldMsgCount of
                     ?MAX_INT -> 0; 
                     C when is_integer(C) -> C + 1
                 end,
-                lists:foldl(KeyStore, OldPayload,
-                            [{IncMsgCount, message_count, MsgCount},
-                             {IncSenders, last_message_sender, FromS},
-                             {IncMsgBodies, last_message_body, MsgBody}]);
+                lists:foldl(
+                    KeyStore,
+                    OldPayload,
+                    [{'include-message-count', 'message-count', MsgCount},
+                     {'include-senders', 'last-message-sender', FromS},
+                     {'include-message-bodies', 'last-message-body', MsgBody}]);
+
+
+
+                %lists:foldl(KeyStore, OldPayload,
+                %            [{IncMsgCount, message_count, MsgCount},
+                %             {IncSenders, last_message_sender, FromS},
+                %             {IncMsgBodies, last_message_body, MsgBody}]);
                
            #xmlel{name = <<"presence">>, attrs = Attrs} -> 
                 case proplists:get_value(<<"type">>, Attrs) of
                     <<"subscribe">> ->
                         OldSubscrCount =
-                        proplists:get_value(pending_subscription_count,
+                        proplists:get_value('pending-subscription-count',
                                             OldPayload, 0),
                         SubscrCount =
                         case OldSubscrCount of
                             ?MAX_INT -> 0;
                             C when is_integer(C) -> C + 1
                         end,
-                        lists:foldl(KeyStore, OldPayload,
-                                    [{IncSubscrCount,
-                                      pending_subscription_count, SubscrCount},
-                                     {IncSenders, last_subscription_sender,
-                                      FromS}]);
+                        lists:foldl(
+                            KeyStore,
+                            OldPayload,
+                            [{'include-subscription-count',
+                              'pending-subscription-count', SubscrCount},
+                             {'include-senders', 'last-subscription-sender',
+                              FromS}]);
                     
                     _ -> none
                 end;
@@ -2267,6 +2337,22 @@ parse_form([XDataForm|T], FormType, RequiredFields, OptionalFields) ->
 
                 _ -> parse_form(T, FormType, RequiredFields, OptionalFields)
             end
+    end.
+
+%-------------------------------------------------------------------------
+
+-spec(make_config_form/1 :: (user_config()) -> [xmlelement()]).
+
+make_config_form(Opts) ->
+    Fields =
+    [?TVFIELD(<<"boolean">>, atom_to_binary(K, utf8), [boolean_to_binary(V)]) ||
+     {K, V} <- Opts],
+    case Fields of
+        [] -> [];
+        _ ->
+            [#xmlel{name = <<"x">>,
+                    attrs = [{<<"xmlns">>, ?NS_XDATA}, {<<"type">>, <<"result">>}],
+                    children = [?HFIELD(?NS_PUSH_OPTIONS)|Fields]}]
     end.
 
 %-------------------------------------------------------------------------
