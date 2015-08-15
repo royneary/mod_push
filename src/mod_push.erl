@@ -51,6 +51,7 @@
          on_disco_sm_features/5,
          on_disco_pubsub_info/5,
          on_disco_reg_identity/5,
+         on_disco_sm_identity/5,
          process_adhoc_command/4,
          unregister_client/2,
          check_secret/2]).
@@ -122,12 +123,6 @@
 
 %-------------------------------------------------------------------------
 
-%-record(user_config,
-%        {include_senders :: boolean(),
-%         include_message_count :: boolean(),
-%         include_subscription_count :: boolean(),
-%         include_message_bodies :: boolean()}).
-
 -record(auth_data,
         {auth_key = <<"">> :: binary(),
          package_sid = <<"">> :: binary(),
@@ -185,7 +180,6 @@
 -type reg_type() :: {local_reg, binary()} | % pubsub host
                     {remote_reg, jid(), binary()}.  % pubsub host, secret
 -type subscription() :: #subscription{}.
-%-type user_config() :: #user_config{}.
 -type user_config_option() ::
     'include-senders' | 'include-message-count' | 'include-subscription-count' |
     'include-message-bodies'.
@@ -470,6 +464,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                               reg_type = RegType},
                 case mnesia:read({push_user, {LUser, LServer}}) of
                     [] ->
+                        ?DEBUG("+++++ enable: no user found!", []),
                         GConfig = get_global_config(LServer),
                         case make_config(XDataForms, GConfig, enable_disable) of
                             error -> error;
@@ -486,6 +481,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                     
                     [#push_user{subscriptions = Subscriptions,
                                 config = OldConfig}] ->
+                        ?DEBUG("+++++ enable: found user, config = ~p", [OldConfig]),
                         case make_config(XDataForms, OldConfig, disable_only) of
                             error -> error;
                             {Config, ChangedOpts} -> 
@@ -1235,7 +1231,9 @@ add_disco_hooks(ServerHost) ->
             ejabberd_hooks:add(disco_info, ServerHost, ?MODULE,
                                on_disco_pubsub_info, 101),
             ejabberd_hooks:add(disco_local_identity, RegHost, ?MODULE,
-                               on_disco_reg_identity, 50)
+                               on_disco_reg_identity, 50),
+            ejabberd_hooks:add(disco_sm_identity, ServerHost, ?MODULE,
+                               on_disco_sm_identity, 49)
         end,
         BackendKeys).
 
@@ -1631,6 +1629,32 @@ on_disco_reg_identity(Acc, _From, #jid{lserver = RegHost}, <<"">>, _Lang) ->
 on_disco_reg_identity(Acc, _From, _To, _Node, _Lang) ->
     Acc.
                
+on_disco_sm_identity(Acc, From, To, <<"">>, _Lang) ->
+    FromL = jlib:jid_tolower(From),
+    ToL = jlib:jid_tolower(To),
+    case jlib:jid_remove_resource(FromL) =:= ToL of
+        true ->
+            F = fun() ->
+                case mnesia:read({push_user, {To#jid.luser, To#jid.lserver}}) of
+                    [] ->
+                        make_config_form(get_global_config(To#jid.lserver)) ++
+                        Acc;
+                    [#push_user{config = Config}] ->
+                        make_config_form(Config) ++ Acc
+                end
+            end,
+            case mnesia:transaction(F) of
+                {atomic, Elements} -> Elements;
+                _ -> Acc
+            end;
+
+        false ->
+            Acc
+    end;
+
+on_disco_sm_identity(Acc, _From, _To, _Node, _Lang) ->
+    Acc.
+
 %-------------------------------------------------------------------------
 % gen_mod callbacks
 %-------------------------------------------------------------------------
@@ -1748,6 +1772,8 @@ stop(Host) ->
                 ejabberd_router:unregister_route(PubsubHost),
                 ejabberd_hooks:delete(adhoc_local_commands, RegHost, ?MODULE,
                                       process_adhoc_command, 75),
+                ejabberd_hooks:delete(disco_sm_identity, Host, ?MODULE,
+                                      on_disco_sm_identity, 49),
                 ejabberd_hooks:delete(disco_local_identity, RegHost, ?MODULE,
                                       on_disco_reg_identity, 50),
                 ejabberd_hooks:delete(disco_info, Host, ?MODULE,
@@ -1799,26 +1825,6 @@ get_global_config(Host) ->
                              fun(B) when is_boolean(B) -> B end,
                              ?INCLUDE_MSG_BODIES_DEFAULT)}].
 
-
-
-   %#user_config{
-   %     include_senders =
-   %     gen_mod:get_module_opt(Host, ?MODULE, include_senders,
-   %                            fun(B) when is_boolean(B) -> B end,
-   %                            ?INCLUDE_SENDERS_DEFAULT),
-   %     include_message_count =
-   %     gen_mod:get_module_opt(Host, ?MODULE, include_message_count,
-   %                            fun(B) when is_boolean(B) -> B end,
-   %                            ?INCLUDE_MSG_COUNT_DEFAULT),
-   %     include_subscription_count =
-   %     gen_mod:get_module_opt(Host, ?MODULE, include_subscription_count,
-   %                            fun(B) when is_boolean(B) -> B end,
-   %                     ?INCLUDE_SUBSCR_COUNT_DEFAULT),
-   %     include_message_bodies =
-   %     gen_mod:get_module_opt(Host, ?MODULE, include_message_bodies,
-   %                            fun(B) when is_boolean(B) -> B end,
-   %                            ?INCLUDE_MSG_BODIES_DEFAULT)}.
-
 %-------------------------------------------------------------------------
 
 -spec(make_config/3 ::
@@ -1836,6 +1842,7 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
         disable_only ->
             fun
                 (true, false) -> true;
+                (Old, New) when Old =:= New -> true;
                 (_, _) -> false
             end;
         enable_disable ->
@@ -1872,17 +1879,16 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
 
                 false ->
                     lists:foldl(
-                        fun({Key, Value}, {ConfigAcc, ChangedOptsAcc}) ->
+                        fun({Key, Value}, {ConfigAcc, AcceptedOptsAcc}) ->
                             OldValue = proplists:get_value(Key, OldConfig),
-                            ChangeOpt =
-                            is_boolean(Value) and OptionAllowed(OldValue, Value),
-                            case ChangeOpt of
+                            AcceptOpt = OptionAllowed(OldValue, Value),
+                            case AcceptOpt of
                                 true ->
                                     {[{Key, Value}|ConfigAcc],
-                                     [{Key, Value}|ChangedOptsAcc]};
+                                     [{Key, Value}|AcceptedOptsAcc]};
                                 false ->
                                     {[{Key, OldValue}|ConfigAcc],
-                                     ChangedOptsAcc}
+                                     AcceptedOptsAcc}
                             end
                         end,
                         {[], []},
@@ -1890,99 +1896,6 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
             end
     end.
                     
-
-
-    
-
-
-    %[<<"include-senders">>, <<"include-message-count">>,
-    % <<"include-subscription-count">>, <<"include-message-bodies">>],
-    %OptionalFields =
-    %lists:map(
-    %    fun(F) -> {{single, F},
-    %               fun(B) -> binary_to_boolean(B, undefined) end}
-    %    end,
-    %    AllowedOpts),
-    %ParseResult = parse_form(XDataForms, ?NS_PUSH_OPTIONS, [], OptionalFields),
-    %case ParseResult of
-    %    error -> error;
-
-    %    not_found -> {DefConfig, []};
-
-    %    {result, ParsedTupleList} ->
-    %        AnyError = lists:any(
-    %            fun
-    %                (error) -> true;
-    %                (_) -> false
-    %            end,
-    %            ParsedTupleList),
-    %        case AnyError of
-    %            true ->
-    %                error;
-
-    %            false ->
-    %                [IncSenders, IncMsgCount, IncSubscrCount, IncMsgBodies] =
-    %                ParsedTupleList,
-    %                Config =
-    %                #user_config{
-    %                    include_senders =
-    %                    case OptionAllowed(DefIncSenders, IncSenders) of
-    %                        true -> IncSenders;
-    %                        false -> DefIncSenders
-    %                    end,
-    %                    include_message_count =
-    %                    case OptionAllowed(DefIncMsgCount, IncMsgCount) of
-    %                        true -> IncMsgCount;
-    %                        false -> DefIncMsgCount
-    %                    end,
-    %                    include_subscription_count =
-    %                    case OptionAllowed(DefIncSubscrCount, IncSubscrCount) of
-    %                        true -> IncSubscrCount;
-    %                        false -> DefIncSubscrCount
-    %                    end,
-    %                    include_message_bodies =
-    %                    case OptionAllowed(DefIncMsgBodies, IncMsgBodies) of
-    %                        true -> IncMsgBodies;
-    %                        false -> DefIncMsgBodies
-    %                    end},
-    %                    ChangedOpts =
-    %                    
-
-
-
-    %                    ChangedOptsFields =
-    %                    lists:filtermap(
-    %                        fun({Opt, OldValue, NewValue}) ->
-    %                           case OptionAllowed(OldValue, NewValue) of
-    %                                true ->
-    %                                    {true,
-    %                                     ?TVFIELD(<<"boolean">>, Opt,
-    %                                              [boolean_to_binary(NewValue)])};
-    %                                false -> false
-    %                            end
-    %                        end,
-    %                        lists:zip3(
-    %                            AllowedOpts,
-    %                            [DefIncSenders, DefIncMsgCount,
-    %                             DefIncSubscrCount, DefIncMsgBodies],
-    %                            ParsedTupleList)),
-    %                    ?DEBUG("+++++ ChangedOptsFields = ~p", [ChangedOptsFields]),
-    %                    ?DEBUG("+++++ Children = ~p", [[?HFIELD(?NS_PUSH_OPTIONS)|ChangedOptsFields]]),
-    %                    ResponseForm = case ChangedOptsFields of
-    %                        [] -> [];
-    %                        _ ->
-    %                            [#xmlel{
-    %                                name = <<"x">>,
-    %                                attrs = [{<<"xmlns">>, ?NS_XDATA},
-    %                                         {<<"type">>, <<"result">>}],
-    %                                children =
-    %                                [?HFIELD(?NS_PUSH_OPTIONS)|
-    %                                 ChangedOptsFields]}]
-    %                    end,
-    %                    {Config, ResponseForm}
-    %        end
-    %end.
-
 %-------------------------------------------------------------------------
 
 -spec(parse_backends/4 ::
@@ -2101,14 +2014,7 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
                     [{'include-message-count', 'message-count', MsgCount},
                      {'include-senders', 'last-message-sender', FromS},
                      {'include-message-bodies', 'last-message-body', MsgBody}]);
-
-
-
-                %lists:foldl(KeyStore, OldPayload,
-                %            [{IncMsgCount, message_count, MsgCount},
-                %             {IncSenders, last_message_sender, FromS},
-                %             {IncMsgBodies, last_message_body, MsgBody}]);
-               
+              
            #xmlel{name = <<"presence">>, attrs = Attrs} -> 
                 case proplists:get_value(<<"type">>, Attrs) of
                     <<"subscribe">> ->
