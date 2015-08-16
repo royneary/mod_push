@@ -52,6 +52,7 @@
          on_disco_pubsub_info/5,
          on_disco_reg_identity/5,
          on_disco_sm_identity/5,
+         on_remove_user/2,
          process_adhoc_command/4,
          resend_packets/1,
          unregister_client/2,
@@ -915,6 +916,25 @@ resend_packets(Jid) ->
 
 %-------------------------------------------------------------------------
 
+-spec(on_remove_user/2 :: (User :: binary(), Server :: binary()) -> ok).
+
+on_remove_user(User, Server) ->
+    F = fun() ->
+        case mnesia:read({push_user, {User, Server}}) of
+            [] -> ok;
+            [#push_user{subscriptions = Subscriptions}] ->
+                lists:foreach(
+                    fun(#subscription{resource = R}) ->
+                        mnesia:delete({push_stored_packet, {User, Server, R}})
+                    end,
+                    Subscriptions),
+                mnesia:delete({push_user, {User, Server}})
+        end
+    end,
+    mnesia:transaction(F).
+
+%-------------------------------------------------------------------------
+
 -spec(on_affiliation_removal/4 ::
 (
     _User :: jid(),
@@ -1730,6 +1750,7 @@ start(Host, Opts) ->
                        on_affiliation_removal, 50),
     ejabberd_hooks:add(user_available_hook, Host, ?MODULE,
                        resend_packets, 50),
+    ejabberd_hooks:add(remove_user, Host, ?MODULE, on_remove_user, 50),
     % FIXME: disco_sm_info is not implemented in mod_disco!
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
@@ -1766,6 +1787,7 @@ stop(Host) ->
                           on_affiliation_removal, 50),
     ejabberd_hooks:delete(user_available_hook, Host, ?MODULE,
                           resend_packets, 50),
+    ejabberd_hooks:delete(remove_user, Host, ?MODULE, on_remove_user, 50),
     % FIXME:
     %ejabberd_hooks:delete(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
