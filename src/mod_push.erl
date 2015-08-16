@@ -53,7 +53,6 @@
          on_disco_reg_identity/5,
          on_disco_sm_identity/5,
          process_adhoc_command/4,
-         resend_packets/1,
          unregister_client/2,
          check_secret/2]).
 
@@ -476,6 +475,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                                            subscriptions = [Subscr],
                                            config = Config},
                                 mnesia:write(NewUser),
+                                resend_packets(UserJid),
                                 make_config_form(ChangedOpts)
                         end;
                     
@@ -500,6 +500,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
                                            subscriptions = NewSubscriptions,
                                            config = Config},
                                 mnesia:write(NewUser),
+                                resend_packets(UserJid),
                                 make_config_form(ChangedOpts)
                         end
                 end
@@ -649,7 +650,7 @@ list_registrations(#jid{luser = LUser, lserver = LServer}) ->
 on_store_stanza(RerouteFlag, To, Stanza) ->
     ?DEBUG("++++++++++++ Stored Stanza for ~p: ~p",
            [To, Stanza]),
-    F = fun() -> dispatch([{now(), Stanza, RerouteFlag}], To, false) end,
+    F = fun() -> dispatch([{now(), Stanza}], To, false) end,
     case mnesia:transaction(F) of
         {atomic, not_subscribed} -> RerouteFlag;
         
@@ -668,7 +669,7 @@ on_store_stanza(RerouteFlag, To, Stanza) ->
 
 -spec(dispatch/3 ::
 (
-    Stanzas :: [{erlang:timestamp(), xmlelement(), boolean()}],
+    Stanzas :: [{erlang:timestamp(), xmlelement()}],
     UserJid :: jid(),
     SetPending :: boolean())
     -> ok | not_subscribed
@@ -716,7 +717,7 @@ dispatch(Stanzas, UserJid, SetPending) ->
                                 false -> ok
                             end;
 
-                        {payload, Payload, StanzasToStore} ->
+                        {Payload, StanzasToStore} ->
                             ?DEBUG("+++++ dispatch: payload ~p", [Payload]),
                             Receiver = jlib:jid_tolower(UserJid),
                             lists:foreach(
@@ -728,6 +729,10 @@ dispatch(Stanzas, UserJid, SetPending) ->
                                     mnesia:write(StoredPacket)
                                 end,
                                 StanzasToStore),
+                            WriteUser(Payload),
+                            do_dispatch(RegType, UserJid, NodeId, Payload);
+
+                        Payload ->
                             WriteUser(Payload),
                             do_dispatch(RegType, UserJid, NodeId, Payload)
                     end
@@ -894,24 +899,18 @@ on_unset_presence(User, Server, Resource, _Status) ->
 -spec(resend_packets/1 :: (Jid :: jid()) -> ok).
 
 resend_packets(Jid) ->
-    F = fun() ->
-        LJid = jlib:jid_tolower(Jid),
-        Packets = mnesia:read({push_stored_packet, LJid}),
-        ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(LJid)]),
-        lists:foreach(
-            fun(#push_stored_packet{timestamp = T, packet = P}) ->
-	            FromS = proplists:get_value(<<"from">>, P#xmlel.attrs),
-                From = jlib:string_to_jid(FromS),
-                StampedPacket = jlib:add_delay_info(P, Jid#jid.lserver, T),
-                ejabberd_sm ! {route, From, Jid, StampedPacket}
-            end,
-            lists:keysort(#push_stored_packet.timestamp, Packets)),
-        case Packets of
-            [] -> ok;
-            _ -> mnesia:delete({push_stored_packet, LJid})
-        end
-    end,
-    mnesia:transaction(F).
+    LJid = jlib:jid_tolower(Jid),
+    Packets = mnesia:read({push_stored_packet, LJid}),
+    ?DEBUG("+++++++ resending packets to user ~p", [jlib:jid_to_string(LJid)]),
+    lists:foreach(
+        fun(#push_stored_packet{timestamp = T, packet = P}) ->
+	        FromS = proplists:get_value(<<"from">>, P#xmlel.attrs),
+            From = jlib:string_to_jid(FromS),
+            StampedPacket = jlib:add_delay_info(P, Jid#jid.lserver, T),
+            ejabberd_sm ! {route, From, Jid, StampedPacket}
+        end,
+        lists:keysort(#push_stored_packet.timestamp, Packets)),
+    mnesia:delete({push_stored_packet, LJid}).
 
 %-------------------------------------------------------------------------
 
@@ -1728,8 +1727,6 @@ start(Host, Opts) ->
                        on_disco_sm_features, 50),
     ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
                        on_affiliation_removal, 50),
-    ejabberd_hooks:add(user_available_hook, Host, ?MODULE,
-                       resend_packets, 50),
     % FIXME: disco_sm_info is not implemented in mod_disco!
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
@@ -1764,8 +1761,6 @@ stop(Host) ->
                           on_disco_sm_features, 50),
     ejabberd_hooks:delete(user_receive_packet, Host, ?MODULE,
                           on_affiliation_removal, 50),
-    ejabberd_hooks:delete(user_available_hook, Host, ?MODULE,
-                          resend_packets, 50),
     % FIXME:
     %ejabberd_hooks:delete(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
@@ -1978,15 +1973,15 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
 %% TODO: define more events (e.g. server_available)
 -spec(make_payload/3 ::
 (
-    Event :: {unacked_stanzas, [{erlang:timestamp(), xmlelement(), boolean()}]},
+    Event :: {unacked_stanzas, [{erlang:timestamp(), xmlelement()}]},
     OldPayload :: payload(),
     Config :: user_config())
-    -> none | {payload, payload(), [{erlang:timestamp(), xmlelement()}]}
+    -> {payload(), [{erlang:timestamp(), xmlelement()}]} | payload() | none
 ).
 
 make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
     StanzaToPayload =
-    fun(Stanza, OldPayload) ->
+    fun({_Timestamp, Stanza}, OldPayload) ->
 	    FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
         KeyStore =
         fun({Opt, Key, Value}, Acc) ->
@@ -2045,24 +2040,19 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
             _ -> none
         end
     end,
-    Result =
+    Payload =
     lists:foldl(
-        fun({Timestamp, Stanza, RerouteFlag},
-            {Status, PayloadAcc, StanzasAcc}) ->
-            StanzasToStore = case RerouteFlag of
-                false -> StanzasAcc;
-                _ -> [{Timestamp, Stanza}|StanzasAcc]
-            end,
+        fun(Stanza, {PayloadAcc, StanzasAcc}) ->
             case StanzaToPayload(Stanza, PayloadAcc) of
-                none -> {Status, PayloadAcc, StanzasAcc};
-                P -> {payload, P, StanzasToStore}
+                none -> {PayloadAcc, StanzasAcc};
+                P -> {P, [Stanza|StanzasAcc]}
             end
         end,
-        {none, StoredPayload, []},
+        {StoredPayload, []},
         Stanzas),
-    case Result of
-        {none, _, _} -> none;
-        _ -> Result
+    case Payload of
+        {_, []} -> none;
+        _ -> Payload
     end.
 
 %-------------------------------------------------------------------------
