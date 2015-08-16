@@ -47,7 +47,7 @@ mod_pubsub:
   plugins: 
     - "push"
 ```
-Note: switching from `nodetree = "tree"` to `nodetree = "virtual"` currently causes mod_pubsub crashes. A workaroung is to clear the pubsub mnesia tables. This affects all pubsub services on the ejabberd instance.
+Note: switching from `nodetree = "tree"` to `nodetree = "virtual"` currently causes mod_pubsub crashes. A workaround is to clear the pubsub mnesia tables. This affects all pubsub services on the ejabberd instance.
 ```bash
 ejabberdctl debug
 mnesia:clear_table(pubsub_node).
@@ -78,7 +78,7 @@ mod_push:
   include_message_count: true
   include_subscription_count: true
 ```
-A user can obtain the current push configuration (the server's default configuration if he never changed it) by sending a service discovery info request to his bare jid. The reponse will contain a form of `FORM_TYPE` `urn:xmpp:push:options`.
+A user can obtain the current push configuration (the server's default configuration if he never changed it) by sending a service discovery info request to his bare jid. The response will contain a form of `FORM_TYPE` `urn:xmpp:push:options`.
 
 ```xml
 <iq from='bill@example.net' to='bill@example.net/Home' id='x13' type='result'>
