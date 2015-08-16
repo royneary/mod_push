@@ -47,6 +47,16 @@ mod_pubsub:
   plugins: 
     - "push"
 ```
+Note: switching from `nodetree = "tree"` to `nodetree = "virtual"` currently causes mod_pubsub crashes. A workaroung is to clear the pubsub mnesia tables. This affects all pubsub services on the ejabberd instance.
+```bash
+ejabberdctl debug
+mnesia:clear_table(pubsub_node).
+mnesia:clear_table(pubsub_state).
+mnesia:clear_table(pubsub_index).
+mnesia:clear_table(pubsub_subscription).
+mnesia:clear_table(pubsub_item).
+```
+
 If you want to allow other XMPP servers to use your app server you need a SRV record in your DNS server:
 ```fundamental
 _xmpp-server._tcp.push.example.net. 86400 IN SRV 5 0 5269 example.net.
@@ -68,8 +78,26 @@ mod_push:
   include_message_count: true
   include_subscription_count: true
 ```
+A user can obtain the current push configuration (the server's default configuration if he never changed it) by sending a service discovery info request to his bare jid. The reponse will contain a form of `FORM_TYPE` `urn:xmpp:push:options`.
 
-Users can set their configuration by including a form of `FORM_TYPE` `urn:xmpp:push:options` into the enable request. Note that this configuration is a per-user configuration that is valid for all resources. To send publish-options which are passed to the pubsub-service when publishing a notification an other form of `FORM_TYPE` `http://jabber.org/protocol/pubsub#publish-options` can be included. In this example it contains a secret a pubsub service might require as credential. mod_push's internal app server does require providing the secret obtained during registration.
+```xml
+<iq from='bill@example.net' to='bill@example.net/Home' id='x13' type='result'>
+  <query xmlns='http://jabber.org/protocol/disco#info'>
+    <x xmlns='jabber:x:data' type='result'>
+      <field type='hidden' var='FORM_TYPE'><value>urn:xmpp:push:options</value></field>
+      <field type='boolean' var='include-senders'><value>0</value></field>
+      <field type='boolean' var='include-message-count'><value>1</value></field>
+      <field type='boolean' var='include-subscription-count'><value>1</value></field>
+      <field type='boolean' var='include-message-bodies'><value>0</value></field>
+    </x>
+    <identity category='account' type='registered'/>
+    <feature var='http://jabber.org/protocol/disco#info'/>
+    <feature var='urn:xmpp:push:0'/>
+  </query>
+</iq>
+```
+
+A can change her configuration by including a form of `FORM_TYPE` `urn:xmpp:push:options` into the enable request. Note that this configuration is a per-user configuration that is valid for all resources. To send publish-options which are passed to the pubsub-service when publishing a notification an other form of `FORM_TYPE` `http://jabber.org/protocol/pubsub#publish-options` can be included. In this example it contains a secret a pubsub service might require as credential. mod_push's internal app server does require providing the secret obtained during registration.
 
 ```xml
 <iq type='set' to='example.net' id='x42'>                                                
@@ -90,6 +118,9 @@ Users can set their configuration by including a form of `FORM_TYPE` `urn:xmpp:p
 ```
 
 mod_push provides in-band configuration although not recommended by XEP-0357. In order to prevent privilege escalation as mentioned in the XEP subsequent enable requests are only allowed to disable options, not enable them. A fresh configuration is only possible after all push-enabled resources have been disabled.
+
+The response to an enable request with configuration form will include
+those values that have been accepted for the new configuration.
 
 ###App server configuration
 You can set up multiple app server backends for the different push
