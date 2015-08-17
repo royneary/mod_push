@@ -439,7 +439,7 @@ enable(_UserJid, _PubsubJid, undefined, _XDataForms) ->
 enable(_UserJid, _PubsubJid, <<"">>, _XDataForms) ->
     {error, ?ERR_NOT_ACCEPTABLE};
 
-enable(#jid{luser = LUser, lserver = LServer, lresource = LResource} = UserJid,
+enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
        #jid{lserver = PubsubHost} = PubsubJid, Node, XDataForms) ->
     ParsedSecret =
     parse_form(XDataForms, ?NS_PUBLISH_OPTIONS, [], [{single, <<"secret">>}]),
@@ -706,10 +706,7 @@ dispatch(Stanzas, UserJid, SetPending) ->
                                            payload = NewPayload},
                         mnesia:write(NewUser)
                     end,
-                    PayloadResult =
-                    make_payload({unacked_stanzas, Stanzas}, OldPayload,
-                                 Config),
-                    case PayloadResult of
+                    case make_payload(Stanzas, OldPayload, Config) of
                         none ->
                             ?DEBUG("+++++ dispatch: no payload", []),
                             case SetPending of
@@ -730,7 +727,8 @@ dispatch(Stanzas, UserJid, SetPending) ->
                                 end,
                                 StanzasToStore),
                             WriteUser(Payload),
-                            do_dispatch(RegType, UserJid, NodeId, Payload)
+                            do_dispatch(RegType, {LUser, LServer}, NodeId,
+                                        Payload)
                     end
             end
     end.
@@ -740,16 +738,15 @@ dispatch(Stanzas, UserJid, SetPending) ->
 -spec(do_dispatch/4 ::
 (
     RegType :: reg_type(),
-    Receiver :: jid(),
+    UserBare :: bare_jid(),
     NodeId :: binary(),
     Payload :: payload())
     -> dispatched | ok
 ).
 
-do_dispatch({local_reg, _}, #jid{luser = LUser, lserver = LServer}, NodeId,
-            Payload) ->
+do_dispatch({local_reg, _}, UserBare, NodeId, Payload) ->
     MatchHeadReg =
-    #push_registration{id = {{LUser, LServer}, '_'},
+    #push_registration{id = {UserBare, '_'},
                        node = NodeId, _='_'},
     SelectedReg =
     mnesia:select(push_registration,
@@ -765,18 +762,18 @@ do_dispatch({local_reg, _}, #jid{luser = LUser, lserver = LServer}, NodeId,
                             backend_id = BackendId,
                             timestamp = Timestamp}] ->
             ?DEBUG("++++ do_dispatch: found registration, dispatch locally", []),
-            dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
-                           true)
+            do_dispatch_local(Payload, Token, AppId, BackendId, RegId,
+                              Timestamp, true)
     end;
 
-do_dispatch({remote_reg, PubsubHost, Secret}, Receiver, NodeId, Payload) ->
+do_dispatch({remote_reg, PubsubHost, Secret}, UserBare, NodeId, Payload) ->
     ?DEBUG("++++ do_dispatch: dispatching remotely", []),
-    dispatch_remote(Receiver, PubsubHost, NodeId, Payload, Secret),
+    do_dispatch_remote(UserBare, PubsubHost, NodeId, Payload, Secret),
     ok.
 
 %-------------------------------------------------------------------------
 
--spec(dispatch_local/7 ::
+-spec(do_dispatch_local/7 ::
 (
     Payload :: payload(),
     Token :: binary(),
@@ -788,8 +785,8 @@ do_dispatch({remote_reg, PubsubHost, Secret}, Receiver, NodeId, Payload) ->
     -> ok
 ).
 
-dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
-               AllowRelay) ->
+do_dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
+                  AllowRelay) ->
     DisableArgs = {RegId, Timestamp},
     [#push_backend{worker = Worker, cluster_nodes = ClusterNodes}] =
     mnesia:read({push_backend, BackendId}),
@@ -818,9 +815,9 @@ dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
            
 %-------------------------------------------------------------------------
 
--spec(dispatch_remote/5 ::
+-spec(do_dispatch_remote/5 ::
 (
-    User :: jid(),
+    UserBare :: bare_jid(),
     PubsubJid :: jid(),
     NodeId :: binary(),
     Payload :: payload(),
@@ -828,7 +825,7 @@ dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
     -> any()
 ).
 
-dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
+do_dispatch_remote({User, Server}, PubsubJid, NodeId, Payload, Secret) ->
     MakeKey = fun(Atom) -> atom_to_binary(Atom, utf8) end,
     Fields =
     lists:foldl(
@@ -868,7 +865,7 @@ dispatch_remote(User, PubsubJid, NodeId, Payload, Secret) ->
                         children =
                         [#xmlel{name = <<"item">>,
                                 children = [Notification]}]}] ++ PubOpts}]},
-    ejabberd_router:route(jlib:jid_remove_resource(User), PubsubJid, Iq).
+    ejabberd_router:route(ljid_to_jid({User, Server, <<"">>}), PubsubJid, Iq).
 
 %-------------------------------------------------------------------------
 
@@ -1072,8 +1069,8 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
             true ->
                 case get_xdata_elements(Children) of
                    [] ->
-                       dispatch_local([], Token, AppId, BackendId, RegId,
-                                      Timestamp, false);
+                       do_dispatch_local([], Token, AppId, BackendId, RegId,
+                                         Timestamp, false);
 
                     XDataForms ->
                         ParseResult =
@@ -1107,8 +1104,9 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                                      {'last-message-body', MsgBody},
                                      {'pending-subscription-count', SubscrCount},
                                      {'last-subscription-sender', SubscrSender}]),
-                                dispatch_local(Payload, Token, AppId, BackendId,
-                                               RegId, Timestamp, false);
+                                do_dispatch_local(Payload, Token, AppId,
+                                                  BackendId, RegId, Timestamp,
+                                                  false);
                              Err ->
                                 ?DEBUG("+++++ parse_form returned ~p", [Err]),
                                 ?INFO_MSG("Cancel dispatching push "
@@ -1293,8 +1291,25 @@ notify_previous_users(Host) ->
     % TODO: send push notifications to all users in table push_user, then delete them
     MatchHead = #push_user{bare_jid = {'_', Host}, _='_'},
     Users = mnesia:select(push_user, [{MatchHead, [], ['$_']}]),
-    lists:foreach(fun mnesia:delete_object/1, Users),
-    ok.
+    lists:foreach(
+        fun(#push_user{bare_jid = BareJid,
+                       subscriptions = Subscrs,
+                       config = Config,
+                       payload = Payload}) ->
+            lists:foreach(
+                fun
+                    (#subscription{pending = true,
+                                   node = Node,
+                                   reg_type = RegType}) ->
+                        FilteredPayload = filter_payload(Payload, Config),
+                        do_dispatch(RegType, BareJid, Node, FilteredPayload);
+
+                    (_) -> ok
+                end,
+                Subscrs)
+        end,
+        Users),
+    lists:foreach(fun mnesia:delete_object/1, Users).
 
 %-------------------------------------------------------------------------
 
@@ -2023,26 +2038,18 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
 
 %-------------------------------------------------------------------------
 
-%% TODO: define more events (e.g. server_available)
 -spec(make_payload/3 ::
 (
-    Event :: {unacked_stanzas, [{erlang:timestamp(), xmlelement()}]},
+    UnackedStanzas :: [{erlang:timestamp(), xmlelement()}],
     OldPayload :: payload(),
     Config :: user_config())
     -> none | {payload, payload(), [{erlang:timestamp(), xmlelement()}]}
 ).
 
-make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
+make_payload(UnackedStanzas, StoredPayload, Config) ->
     StanzaToPayload =
     fun({_Timestamp, Stanza}, OldPayload) ->
 	    FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
-        KeyStore =
-        fun({Opt, Key, Value}, Acc) ->
-            case proplists:get_value(Opt, Config) of
-                true -> lists:keystore(Key, 1, Acc, {Key, Value});
-                false -> Acc
-            end
-        end,
         case Stanza of
             #xmlel{name = <<"message">>, children = Children} ->
                 %% FIXME: Do we want to send push notifications on every message type?
@@ -2061,13 +2068,10 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
                     ?MAX_INT -> 0; 
                     C when is_integer(C) -> C + 1
                 end,
-                lists:foldl(
-                    KeyStore,
-                    OldPayload,
-                    [{'include-message-count', 'message-count', MsgCount},
-                     {'include-senders', 'last-message-sender', FromS},
-                     {'include-message-bodies', 'last-message-body', MsgBody}]);
-              
+                [{'message-count', MsgCount},
+                 {'last-message-sender', FromS},
+                 {'last-message-body', MsgBody}];
+             
            #xmlel{name = <<"presence">>, attrs = Attrs} -> 
                 case proplists:get_value(<<"type">>, Attrs) of
                     <<"subscribe">> ->
@@ -2079,20 +2083,16 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
                             ?MAX_INT -> 0;
                             C when is_integer(C) -> C + 1
                         end,
-                        lists:foldl(
-                            KeyStore,
-                            OldPayload,
-                            [{'include-subscription-count',
-                              'pending-subscription-count', SubscrCount},
-                             {'include-senders', 'last-subscription-sender',
-                              FromS}]);
-                    
+                        [{'pending-subscription-count', SubscrCount},
+                         {'last-subscription-sender', FromS}];
+                   
                     _ -> none
                 end;
 
             _ -> none
         end
     end,
+    
     Result =
     lists:foldl(
         fun(Stanza, {PayloadAcc, StanzasAcc}) ->
@@ -2102,11 +2102,35 @@ make_payload({unacked_stanzas, Stanzas}, StoredPayload, Config) ->
             end
         end,
         {StoredPayload, []},
-        Stanzas),
+        UnackedStanzas),
     case Result of
         {_, []} -> none;
-        {Payload, StanzasToStore} -> {payload, Payload, StanzasToStore}
+        {Payload, StanzasToStore} ->
+            {payload, filter_payload(Payload, Config), StanzasToStore}
     end.
+
+%-------------------------------------------------------------------------
+
+-spec(filter_payload/2 ::
+(
+    Payload :: payload(),
+    Config :: user_config())
+    -> payload()
+).
+
+filter_payload(Payload, Config) ->
+    OptsConfigMapping =
+    [{'message-count', 'include-message-count'},
+     {'last-message-sender', 'include-senders'},
+     {'last-subscription-sender', 'include-senders'},
+     {'last-message-body', 'include-message-bodies'},
+     {'pending-subscription-count', 'include-subscription-count'}],
+    lists:filter(
+        fun({Key, _}) ->
+            ConfigOpt = proplists:get_value(Key, OptsConfigMapping),
+            proplists:get_value(ConfigOpt, Config)
+        end,
+        Payload).
 
 %-------------------------------------------------------------------------
 
