@@ -1311,104 +1311,131 @@ process_adhoc_command(Acc, From, #jid{lserver = LServer},
                       #adhoc_request{node = Command,
                                      action = <<"execute">>,
                                      xdata = XData} = Request) ->
-    Result = case Command of
+    Action = case Command of
         <<"register-push-apns">> ->
-            Parsed = parse_form([XData],
-                                undefined,
-                                [{single, <<"token">>}],
-                                [{single, <<"device-id">>},
-                                 {single, <<"device-name">>}]),
-            case Parsed of
-                {result, [Base64Token, DeviceId, DeviceName]} ->
-                    case catch base64:decode(Base64Token) of
-                        {'EXIT', _} ->
-                            error;
+            fun() ->
+                Parsed = parse_form([XData],
+                                    undefined,
+                                    [{single, <<"token">>}],
+                                    [{single, <<"device-id">>},
+                                     {single, <<"device-name">>}]),
+                case Parsed of
+                    {result, [Base64Token, DeviceId, DeviceName]} ->
+                        case catch base64:decode(Base64Token) of
+                            {'EXIT', _} ->
+                                error;
 
-                        Token ->
-                            register_client(From, LServer, apns, Token,
-                                            DeviceId, DeviceName, <<"">>)
-                    end;
+                            Token ->
+                                register_client(From, LServer, apns, Token,
+                                                DeviceId, DeviceName, <<"">>)
+                        end;
 
-                _ -> error
+                    _ -> error
+                end
             end;
 
         <<"register-push-gcm">> ->
-            Parsed = parse_form([XData],
-                                undefined,
-                                [{single, <<"token">>}],
-                                [{single, <<"device-id">>},
-                                 {single, <<"device-name">>}]),
-            case Parsed of
-                {result, [Token, DeviceId, DeviceName]} ->
-                    register_client(From, LServer, gcm, Token, DeviceId,
-                                    DeviceName, <<"">>);
+            fun() ->
+                Parsed = parse_form([XData],
+                                    undefined,
+                                    [{single, <<"token">>}],
+                                    [{single, <<"device-id">>},
+                                     {single, <<"device-name">>}]),
+                case Parsed of
+                    {result, [Token, DeviceId, DeviceName]} ->
+                        register_client(From, LServer, gcm, Token, DeviceId,
+                                        DeviceName, <<"">>);
 
-                _ -> error
+                    _ -> error
+                end
             end;
 
         <<"register-push-mozilla">> ->
-            Parsed = parse_form([XData],
-                                undefined,
-                                [{single, <<"token">>}],
-                                [{single, <<"device-id">>},
-                                 {single, <<"device-name">>}]),
-            case Parsed of
-                {result, [Token, DeviceId, DeviceName]} ->
-                    register_client(From, LServer, mozilla, Token, DeviceId,
-                                    DeviceName, <<"">>);
+            fun() ->
+                Parsed = parse_form([XData],
+                                    undefined,
+                                    [{single, <<"token">>}],
+                                    [{single, <<"device-id">>},
+                                     {single, <<"device-name">>}]),
+                case Parsed of
+                    {result, [Token, DeviceId, DeviceName]} ->
+                        register_client(From, LServer, mozilla, Token, DeviceId,
+                                        DeviceName, <<"">>);
 
-                _ -> error
+                    _ -> error
+                end
             end;
 
         <<"register-push-ubuntu">> ->
-            Parsed = parse_form([XData],
-                                undefined,
-                                [{single, <<"token">>},
-                                 {single, <<"application-id">>}],
-                                [{single, <<"device-id">>},
-                                 {single, <<"device-name">>}]),
-            case Parsed of
-                {result, [Token, AppId, DeviceId, DeviceName]} ->
-                    register_client(From, LServer, ubuntu, Token,
-                                    DeviceId, DeviceName, AppId);
-                
-                _ -> error
+            fun() ->
+                Parsed = parse_form([XData],
+                                    undefined,
+                                    [{single, <<"token">>},
+                                     {single, <<"application-id">>}],
+                                    [{single, <<"device-id">>},
+                                     {single, <<"device-name">>}]),
+                case Parsed of
+                    {result, [Token, AppId, DeviceId, DeviceName]} ->
+                        register_client(From, LServer, ubuntu, Token,
+                                        DeviceId, DeviceName, AppId);
+                    
+                    _ -> error
+                end
             end;
 
         <<"register-push-wns">> ->
-            Parsed = parse_form([XData],
-                                undefined,
-                                [{single, <<"token">>}],
-                                [{single, <<"device-id">>},
-                                 {single, <<"device-name">>}]),
-            case Parsed of
-                {result, [Token, DeviceId, DeviceName]} ->
-                    register_client(From, LServer, wns, Token, DeviceId,
-                                    DeviceName, <<"">>);
+            fun() ->
+                Parsed = parse_form([XData],
+                                    undefined,
+                                    [{single, <<"token">>}],
+                                    [{single, <<"device-id">>},
+                                     {single, <<"device-name">>}]),
+                case Parsed of
+                    {result, [Token, DeviceId, DeviceName]} ->
+                        register_client(From, LServer, wns, Token, DeviceId,
+                                        DeviceName, <<"">>);
 
-                _ -> error
+                    _ -> error
+                end
             end;
 
         <<"unregister-push">> ->
-            Parsed = parse_form([XData], undefined,
-                                [], [{single, <<"device-id">>},
-                                     {multi, <<"nodes">>}]),
-            case Parsed of
-                {result, [DeviceId, NodeIds]} -> 
-                    unregister_client(From, DeviceId, NodeIds);
+            fun() ->
+                Parsed = parse_form([XData], undefined,
+                                    [], [{single, <<"device-id">>},
+                                         {multi, <<"nodes">>}]),
+                case Parsed of
+                    {result, [DeviceId, NodeIds]} -> 
+                        unregister_client(From, DeviceId, NodeIds);
 
-                not_found ->
-                    unregister_client(From, undefined, []);
+                    not_found ->
+                        unregister_client(From, undefined, []);
 
-                _ -> error
+                    _ -> error
+                end
             end;
 
-        <<"list-push-registrations">> -> list_registrations(From);
+        <<"list-push-registrations">> -> fun() -> list_registrations(From) end;
 
-        _ -> ok
+        _ -> unknown
+    end,
+    Result = case Action of
+        unknown -> unknown;
+        _ ->
+            Host = remove_subdomain(LServer),
+            Access =
+            gen_mod:get_module_opt(Host,
+                                   ?MODULE,
+                                   access_backends,
+                                   fun(A) when is_atom(A) -> A end,
+                                   all),
+            case acl:match_rule(Host, Access, From) of
+                deny -> {error, ?ERR_FORBIDDEN};
+                allow -> Action()
+            end
     end,
     case Result of
-        ok -> Acc;
+        unknown -> Acc;
 
         {registered, {PubsubHost, Node, Secret}} ->
             JidField = [?VFIELD(<<"jid">>, PubsubHost)],
@@ -1653,8 +1680,8 @@ on_disco_reg_identity(Acc, _From, _To, _Node, _Lang) ->
 on_disco_sm_identity(Acc, From, To, <<"">>, _Lang) ->
     FromL = jlib:jid_tolower(From),
     ToL = jlib:jid_tolower(To),
-    case jlib:jid_remove_resource(FromL) =:= ToL of
-        true ->
+    case jlib:jid_remove_resource(FromL) of
+        ToL ->
             F = fun() ->
                 case mnesia:read({push_user, {To#jid.luser, To#jid.lserver}}) of
                     [] ->
@@ -1669,8 +1696,7 @@ on_disco_sm_identity(Acc, From, To, <<"">>, _Lang) ->
                 _ -> Acc
             end;
 
-        false ->
-            Acc
+        _ -> Acc
     end;
 
 on_disco_sm_identity(Acc, _From, _To, _Node, _Lang) ->
@@ -2122,6 +2148,19 @@ get_certfile(Opts) ->
 
 is_local_domain(Hostname) ->
     lists:member(Hostname, ejabberd_router:dirty_get_all_domains()).
+
+%-------------------------------------------------------------------------
+
+-spec(remove_subdomain/1 :: (Hostname :: binary()) -> binary()).
+
+remove_subdomain(Hostname) ->
+    Dots = binary:matches(Hostname, <<".">>),
+    case length(Dots) of
+        NumberDots when NumberDots > 1 ->
+            {Pos, _} = lists:nth(NumberDots - 1, Dots),
+            binary:part(Hostname, {Pos + 1, byte_size(Hostname) - Pos - 1});
+        _ -> Hostname
+    end.
 
 %-------------------------------------------------------------------------
 
