@@ -28,9 +28,13 @@ ejabberdctl modules_available
 ejabberdctl module_install mod_push 
 ```
 
+##Important implementation details
+mod_push depends on stream management (XEP-0198) stream resumption. A client will only receive push notifications when the server detects a dead TCP connection. After that the server will wait for the client to resume the stream. We call this state "pending" state (a.k.a. zombie state). To enter the pending state clients are expected to close their TCP connection without sending `</stream>`. They will typically do so in a handler the mobile OS will call before moving the application into background.
+Administrators sometimes have to restart XMPP servers. Ejabberd will close all open streams in that event which means that after a restart stream management will no longer notify mod_push about incoming stanzas for the previous push clients. As a solution to this problem mod_push will send a push notification to all previously pending push users after a restart so they can open a new connection. Currently this notification can not be distinguished from a "normal" notification (e.g. one sent in the event of an incoming message). This means a client will typically try to resume the stream which will fail as it does not exist anymore. Then it can start a new stream and re-enable push.
+Registrations at mod_push's app server will not be affected by server restarts so clients do not need to re-register. 
+
 ##Configuration
 ###stream management
-mod_push depends on stream management (XEP-0198) stream resumption. Clients are expected to close the TCP connection to the server without sending `</stream>` when they want to receive push notifications.
 The option `resume_timeout` for module ejabberd_c2s in the listen-section of
 ejabberd.yml must be set to a value greater than 0 (default value is 300). This enables
 stream resumption but the value has no effect on push users since mod_push
