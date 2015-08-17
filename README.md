@@ -39,7 +39,7 @@ overwrites this value to keep them pending for a long time.
 ###pubsub configuration
 An XEP-0357 app server requires a pubsub service where XMPP servers can publish
 notifications. The pubsub service needs a dedicated hostname.
-If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual"` must be set.` The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
+If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual"` must be set. The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
 ```yaml
 mod_pubsub:
   host : "push.example.net"
@@ -63,6 +63,7 @@ _xmpp-server._tcp.push.example.net. 86400 IN SRV 5 0 5269 example.net.
 ```
 
 ###XEP-0357 configuration
+####User-definable options
 There are user-definable config options to specify what contents should be in
 a push notification. You can set default values for them in the mod_push
 section:
@@ -122,13 +123,16 @@ mod_push provides in-band configuration although not recommended by XEP-0357. In
 The response to an enable request with configuration form will include
 those values that have been accepted for the new configuration.
 
+####restrict access
+The option `access_backends` allows restricting access to the app server backends using ejabberd's acl feature. `access_backends` may be defined in the mod_push section. The default value is `all`. The example configuration only allows local XMPP users to use the app server.
+
 ###App server configuration
 You can set up multiple app server backends for the different push
 notification services. This is not required, your users can use external app
 servers too. 
 
 ####Common options
-* `register_host`: the app server host where users can register. Should be the XMPP server host, so users don't have to guess it (no service discovery implemented yet).
+* `register_host`: the app server host where users can register. Must be a subdomain of the XMPP server hostname or the XMPP server hostname itself. The advantage of choosing the XMPP server hostname is that clients don't have to guess any subdomain (XEP-0357 does not define service discovery for finding app servers).
 * `pubsub_host`: the pubsub_host of the backend
 * `type`: apns|gcm|mozilla|ubuntu|wns
 * `app_name`: the name of the app the backend is configured for, will be send to the user when service discovery is done on the register_host; the default value is "any", but that's only a valid value for backend types that don't require developer credentials, that is ubuntu and mozilla
@@ -145,31 +149,41 @@ servers too.
 
 ###Example configuration
 ```yaml
-mod_pubsub:
-  host : "push.example.net"
-  nodetree : "virtual"
-  plugins: 
-    - "push"
+access:
+  local_users:
+    local: allow
 
-mod_push:
-  include_senders: true
-  backends:
-    -
-      type: ubuntu
-      register_host: "example.net"
-      pubsub_host: "push.example.net"
-    -
-      type: gcm
-      app_name: "chatninja"
-      register_host: "example.net"
-      pubsub_host: "push.example.net"
-      auth_key: "HgeGfbhwplu7F-fjCUf6gBfkauUaq12h0nHazqc" 
-    -
-      type: apns
-      app_name: "chatninja"
-      register_host: "example.net"
-      pubsub_host: "push.example.net"
-      certfile: "/etc/ssl/private/apns_example_app.pem"  
+acl:
+  local:
+    server: "example.net"
+
+modules:
+  mod_pubsub:
+    host : "push.example.net"
+    nodetree : "virtual"
+    plugins: 
+      - "push"
+  
+  mod_push:
+    include_senders: true
+    access_backends: local_users
+    backends:
+      -
+        type: ubuntu
+        register_host: "example.net"
+        pubsub_host: "push.example.net"
+      -
+        type: gcm
+        app_name: "chatninja"
+        register_host: "example.net"
+        pubsub_host: "push.example.net"
+        auth_key: "HgeGfbhwplu7F-fjCUf6gBfkauUaq12h0nHazqc" 
+      -
+        type: apns
+        app_name: "chatninja"
+        register_host: "example.net"
+        pubsub_host: "push.example.net"
+        certfile: "/etc/ssl/private/apns_example_app.pem"  
 ```
 
 ##App server usage
