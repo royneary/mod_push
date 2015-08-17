@@ -1995,10 +1995,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                               ValidType =:= mozilla;
                               ValidType =:= ubuntu;
                               ValidType =:= wns ->
-                    AppName =
-                    proplists:get_value(app_name, BackendOpts),
                     BackendId =
-                    erlang:phash2({RegisterHost, PubsubHost, Type, AppName}),
+                    erlang:phash2({RegisterHost, Type}),
                     AuthData =
                     #auth_data{
                         auth_key = proplists:get_value(auth_key, BackendOpts),
@@ -2009,6 +2007,8 @@ parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
                     gen_mod:get_module_proc(
                         Host,
                         combine_to_atom(?MODULE, Type, AuthData)), 
+                    AppName =
+                    proplists:get_value(app_name, BackendOpts),
                     Backend =
                     #push_backend{
                         id = BackendId,
