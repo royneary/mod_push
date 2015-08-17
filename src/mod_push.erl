@@ -1155,15 +1155,17 @@ check_secret(Secret, PubOpts) ->
 
 %-------------------------------------------------------------------------
 
--spec(add_backends/2 ::
+-spec(add_backends/1 ::
 (
-    Host :: binary(),
-    Opts :: [any()])
+    Host :: binary())
     -> ok | error
 ).
 
-add_backends(Host, Opts) ->
-    CertFile = get_certfile(Opts),
+add_backends(Host) ->
+    CertFile =
+    gen_mod:get_module_opt(Host, ?MODULE, certfile,
+                           fun(C) when is_binary(C) -> C end,
+                           <<"">>),
     BackendOpts =
     gen_mod:get_module_opt(Host, ?MODULE, backends,
                            fun(O) when is_list(O) -> O end,
@@ -1728,7 +1730,7 @@ on_disco_sm_identity(Acc, _From, _To, _Node, _Lang) ->
     -> any()
 ).
 
-start(Host, Opts) ->
+start(Host, _Opts) ->
     % FIXME: is this fixed?
     % FIXME: Currently we're assuming that in a cluster all instances have
     % exactly the same mod_push configuration. This is because we want every
@@ -1795,7 +1797,7 @@ start(Host, Opts) ->
     % FIXME: disco_sm_info is not implemented in mod_disco!
     %ejabberd_hooks:add(disco_sm_info, Host, ?MODULE, on_disco_sm_info, 50),
     F = fun() ->
-        add_backends(Host, Opts),
+        add_backends(Host),
         add_disco_hooks(Host),
         notify_previous_users(Host)
     end,
@@ -2154,18 +2156,6 @@ set_pending(Resource, NewVal, Subscrs) ->
 
 %-------------------------------------------------------------------------
 % general utility functions
-%-------------------------------------------------------------------------
-
--spec(get_certfile/1 :: (Opts :: [any()]) -> binary()).
-
-get_certfile(Opts) ->
-    case catch iolist_to_binary(proplists:get_value(certfile, Opts)) of
-	Filename when is_binary(Filename), Filename /= <<"">> ->
-	    Filename;
-	_ ->
-	    undefined
-    end.
-
 %-------------------------------------------------------------------------
 
 -spec(is_local_domain/1 :: (Hostname :: binary()) -> boolean()).

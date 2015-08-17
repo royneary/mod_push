@@ -134,13 +134,17 @@ The option `access_backends` allows restricting access to the app server backend
 ###App server configuration
 You can set up multiple app server backends for the different push
 notification services. This is not required, your users can use external app
-servers too. 
+servers too.
+
+####Default options
+* `certfile`: the path to a certificate file (pem format, containing both certificate and private key) used as default for all backends
 
 ####Common options
 * `register_host`: the app server host where users can register. Must be a subdomain of the XMPP server hostname or the XMPP server hostname itself. The advantage of choosing the XMPP server hostname is that clients don't have to guess any subdomain (XEP-0357 does not define service discovery for finding app servers).
 * `pubsub_host`: the pubsub_host of the backend
 * `type`: apns|gcm|mozilla|ubuntu|wns
 * `app_name`: the name of the app the backend is configured for, will be send to the user when service discovery is done on the register_host; the default value is "any", but that's only a valid value for backend types that don't require developer credentials, that is ubuntu and mozilla
+* `certfile`: the path to a certificate file (pem format, containing both certificate and private key) the backend will use for TLS
 
 ####APNS-specific options
 * `certfile`: path to a pem file containing the developer's private key and the certificate obtained from Apple during the provisioning procedure
@@ -172,6 +176,7 @@ modules:
   mod_push:
     include_senders: true
     access_backends: local_users
+    certfile: "/etc/ssl/private/example.pem"
     backends:
       -
         type: ubuntu
