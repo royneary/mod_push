@@ -1,7 +1,7 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_push.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
-%%% Purpose : Send push notifications to clients in wait_for_resume state
+%%% Purpose : implements XEP-0357 Push and an IM-focussed app server
 %%%           
 %%% Created : 22 Dec 2014 by Christian Ulrich <christian@rechenwerk.net>
 %%%
@@ -23,16 +23,6 @@
 %%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 %%%
 %%%----------------------------------------------------------------------
-
-%%% implements XEP-0357 Push and an IM-focussed app server
-
-% TODO: more push events:
-% - stream errors,
-% - server available (after restart),
-% - session terminates (sm_remote_connection_hook)
-% TODO: subscribe to event {mnesia_down, Node}, to clean nodes from
-% backends' cluster_nodes lists; when no nodes are left, a backend
-% and all users registered on it have to be deleted!
 
 -module(mod_push).
 
@@ -134,7 +124,6 @@
                        pending = false :: boolean(),
                        node :: binary(),
                        reg_type :: reg_type()}).
-                       %timestamp = os:timestamp() :: erlang:timestamp()}).
 
 %% mnesia table
 -record(push_user, {bare_jid :: bare_jid(),
@@ -143,8 +132,9 @@
                     payload = [] :: payload()}).
 
 %% mnesia table
--record(push_registration, {id :: {bare_jid(), device_id()},
-                            node :: binary(),
+-record(push_registration, {node :: binary(),
+                            bare_jid :: bare_jid(),
+                            device_id :: binary(),
                             device_name :: binary(),
                             token :: binary(),
                             secret :: binary(),
@@ -171,7 +161,6 @@
 -type auth_data() :: #auth_data{}.
 -type backend_type() :: apns | gcm | mozilla | ubuntu | wns.
 -type bare_jid() :: {binary(), binary()}.
--type device_id() :: binary().
 -type payload_key() ::
     'last-message-sender' | 'last-subscription-sender' | 'message-count' |
     'pending-subscription-count' | 'last-message-body'.
@@ -179,7 +168,7 @@
 -type payload() :: [{payload_key(), payload_value()}].
 -type push_backend() :: #push_backend{}.
 -type push_registration() :: #push_registration{}.
--type reg_type() :: {local_reg, binary()} | % pubsub host
+-type reg_type() :: {local_reg, binary(), binary()} | % pubsub host, secret
                     {remote_reg, jid(), binary()}.  % pubsub host, secret
 -type subscription() :: #subscription{}.
 -type user_config_option() ::
@@ -220,8 +209,6 @@ register_client(#jid{luser = LUser,
         MatchingBackends =
         mnesia:select(push_backend, [{MatchHeadBackend, [], ['$_']}]),
         case MatchingBackends of
-            %% FIXME: there might be type = apns, but app_name chatninja1 AND 
-            %% chatninja2!
             [#push_backend{id = BackendId, pubsub_host = PubsubHost}|_] ->
                 ?DEBUG("+++++ register_client: found backend", []),
                 ChosenDeviceId = case DeviceId of
@@ -230,15 +217,18 @@ register_client(#jid{luser = LUser,
                     _ -> DeviceId
                 end,
                 Secret = randoms:get_string(),
+                MatchHeadReg =
+                #push_registration{bare_jid = {LUser, LServer},
+                                   device_id = ChosenDeviceId, _='_'},
                 ExistingReg =
-                mnesia:read({push_registration,
-                             {{LUser, LServer}, ChosenDeviceId}}),
+                mnesia:select(push_registration, [{MatchHeadReg, [], ['$_']}]),
                 Registration =
                 case ExistingReg of
                     [] ->
                         NewNode = randoms:get_string(),
-                        #push_registration{id = {{LUser, LServer}, ChosenDeviceId},
-                                           node = NewNode,
+                        #push_registration{node = NewNode,
+                                           bare_jid = {LUser, LServer},
+                                           device_id = ChosenDeviceId,
                                            device_name = DeviceName,
                                            token = Token,
                                            secret = Secret,
@@ -274,15 +264,14 @@ register_client(#jid{luser = LUser,
 
 -spec(unregister_client/2 ::
 (
-    RegId :: {bare_jid(), device_id()},
+    Node :: binary(),
     Timestamp :: erlang:timestamp())
     -> error | {error, xmlelement()} | {unregistered, ok} |
        {unregistered, [binary()]}
 ).
 
-unregister_client({{User, Server}, DeviceId}, Timestamp) ->
-    unregister_client(ljid_to_jid({User, Server, <<"">>}), DeviceId, Timestamp,
-                      []).
+unregister_client(Node, Timestamp) ->
+    unregister_client(undefined, undefined, Timestamp, [Node]). 
 
 %-------------------------------------------------------------------------
 
@@ -307,21 +296,24 @@ unregister_client(Jid, DeviceId, NodeIds) ->
 
 -spec(unregister_client/4 ::
 (
-    jid(),
+    UserJid :: jid(),
     DeviceId :: binary(),
     Timestamp :: erlang:timestamp(),
-    NodeIds :: [binary()])
+    Nodes :: [binary()])
     -> error | {error, xmlelement()} | {unregistered, ok} |
        {unregistered, [binary()]}
 ).
 
-unregister_client(#jid{lresource = <<"">>}, undefined, _Timestamp, []) ->
-    error;
+unregister_client(#jid{lresource = <<"">>}, undefined, _, []) -> error;
+unregister_client(#jid{lresource = <<"">>}, <<"">>, _, []) -> error;
+unregister_client(undefined, undefined, _, []) -> error;
+unregister_client(undefined, <<"">>, _, []) -> error;
 
-unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} = User,
-                  DeviceId, Timestamp, NodeIds) ->
+unregister_client(UserJid, DeviceId, Timestamp, Nodes) ->
     DisableIfLocal =
-    fun(Node, BackendId) ->
+    fun(#push_registration{node = Node,
+                           bare_jid = {User, Server},
+                           backend_id = BackendId}) ->
         MatchHeadBackend =
         #push_backend{id = BackendId, pubsub_host = '$1', _='_'},
         Selected =
@@ -329,10 +321,10 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
         case Selected of
             [] -> ?DEBUG("++++ Backend does not exist!", []);
             [PubsubHost] ->
-                case is_local_domain(LServer) of
+                PubsubJid = ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
+                UserBareJid = ljid_to_jid({User, Server, <<"">>}),
+                case is_local_domain(Server) of
                     false ->
-                        BUser =
-                        jlib:jid_remove_resource(User),
                         PubsubNotification =
                         #xmlel{
                             name = <<"pubsub">>,
@@ -345,7 +337,7 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
                                 [#xmlel{
                                     name = <<"affiliation">>,
                                     attrs = [{<<"jid">>,
-                                              jlib:jid_to_string(BUser)},
+                                              jlib:jid_to_string(UserBareJid)},
                                              {<<"affiliation">>,
                                               <<"none">>}]}]}]},
                         PubsubMessage =
@@ -354,70 +346,82 @@ unregister_client(#jid{luser = LUser, lserver = LServer, lresource = LResource} 
                            attrs = [],
                            children = [PubsubNotification]},
                         ejabberd_router:route(
-                             ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
-                             BUser,
-                             PubsubMessage);
+                            PubsubJid,
+                            UserBareJid,
+                            PubsubMessage);
 
                     true ->
-                        disable(User, ljid_to_jid({<<"">>, PubsubHost, <<"">>}),
-                                Node, true)
+                        disable(UserBareJid, PubsubJid, Node, true)
                 end
         end
     end,
     F = fun() ->
-        case NodeIds of
+        case Nodes of
             [] ->
+                #jid{luser = LUser, lserver= LServer, lresource = LResource} =
+                UserJid,
                 ChosenDeviceId = case DeviceId of
-                    undefined -> LResource; 
+                    undefined -> LResource;
                     <<"">> -> LResource;
                     _ -> DeviceId
                 end,
                 MatchHead =
-                #push_registration{id = {{LUser, LServer}, ChosenDeviceId},
-                                   timestamp = Timestamp, _='_'},
+                #push_registration{bare_jid = {LUser, LServer},
+                                   device_id = ChosenDeviceId,
+                                   timestamp = Timestamp,
+                                   _='_'},
                 MatchingReg =
                 mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
                 case MatchingReg of
                     [] -> error;
 
-                    [#push_registration{node = Node, backend_id = BackendId}] ->
-                        ?DEBUG("+++++ deleting registration of user ~p whith device_id "
+                    [Reg] ->
+                        ?DEBUG("+++++ deleting registration of user ~p whith node "
                                "~p",
-                               [jlib:jid_to_string({LUser, LServer, <<"">>}),
-                                ChosenDeviceId]),
-                        mnesia:delete({push_registration,
-                                       {{LUser, LServer}, ChosenDeviceId}}),
-                        DisableIfLocal(Node, BackendId),
+                               [Reg#push_registration.bare_jid,
+                                Reg#push_registration.node]),
+                        mnesia:delete_object(Reg),
+                        DisableIfLocal(Reg),
                         ok
                 end;
 
             GivenNodes ->
-                MatchHead = #push_registration{id = {{LUser, LServer}, '_'},
-                                               node = '$1',
-                                               timestamp = Timestamp, _='_'},
-                SelectedRegs =
-                mnesia:select(push_registration, [{MatchHead, [], ['$_']}]),
-                MatchingRegs =
-                [R || #push_registration{node = N} = R <- SelectedRegs,
-                      lists:member(N, GivenNodes)],
-                case MatchingRegs of
-                    [] -> error;
-                    _ ->
-                        lists:foldl(
-                             fun(#push_registration{id = Id,
-                                                    node = Node,
-                                                    backend_id = BackendId}, Acc) ->
-                                   mnesia:delete({push_registration, Id}),
-                                   DisableIfLocal(Node, BackendId),
-                                   [Node|Acc]
-                             end,
-                             [],
-                             MatchingRegs)
+                UnregisteredNodes =
+                lists:foldl(
+                    fun(Node, Acc) ->
+                        RegResult = mnesia:read({push_registration, Node}),
+                        case RegResult of
+                            [] -> Acc;
+                            [Reg] ->
+                                UserOk =
+                                case UserJid of
+                                    #jid{luser = LUser, lserver = LServer} ->
+                                        BareJid = 
+                                        Reg#push_registration.bare_jid,
+                                        BareJid =:= {LUser, LServer};
+                                    undefined -> true
+                                end,
+                                case UserOk of
+                                    true ->
+                                        mnesia:delete_object(Reg),
+                                        DisableIfLocal(Reg),
+                                        [Node|Acc];
+                                    false -> [error|Acc]
+                                end
+                        end
+                    end,
+                    [],
+                    GivenNodes),
+                case [El || El <- UnregisteredNodes, El =:= error] of
+                    [] -> UnregisteredNodes;
+                    _ -> error
                 end
         end
     end,
     case mnesia:transaction(F) of
-        {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
+        {aborted, Reason} ->
+            ?DEBUG("+++++ unregister_client error: ~p", [Reason]),
+            {error, ?ERR_INTERNAL_SERVER_ERROR};
         {atomic, error} -> error;
         {atomic, Result} -> {unregistered, Result}
     end.
@@ -458,7 +462,7 @@ enable(#jid{luser = LUser, lserver = LServer, lresource = LResource},
                 RegType =
                 case mnesia:select(push_backend, [{MatchHeadBackend, [], ['$1']}]) of
                     [] -> {remote_reg, PubsubJid, Secret};
-                    _ -> {local_reg, PubsubHost}
+                    _ -> {local_reg, PubsubHost, Secret}
                 end,
                 Subscr =
                 #subscription{resource = LResource,
@@ -550,7 +554,7 @@ disable(#jid{luser = LUser, lserver = LServer},
             (Node =:= undefined) or (Node =:= N),
             RegTypeMatching =
             case RegT of
-                {local_reg, P} -> P =:= PubsubHost;
+                {local_reg, P, _} -> P =:= PubsubHost;
                 {remote_reg, J, _} ->
                     (J#jid.luser =:= PubsubJid#jid.luser) and
                     (J#jid.lserver =:= PubsubJid#jid.lserver) and
@@ -627,8 +631,7 @@ delete_subscriptions({LUser, LServer}, SubscriptionPred, StopSessions) ->
 
 list_registrations(#jid{luser = LUser, lserver = LServer}) ->
     F = fun() ->
-        MatchHead = #push_registration{id = {{LUser, LServer}, '_'},
-                                       _='_'},
+        MatchHead = #push_registration{bare_jid = {LUser, LServer}, _='_'},
         mnesia:select(push_registration, [{MatchHead, [], ['$_']}])
     end,
     case mnesia:transaction(F) of
@@ -744,26 +747,37 @@ dispatch(Stanzas, UserJid, SetPending) ->
     -> dispatched | ok
 ).
 
-do_dispatch({local_reg, _}, UserBare, NodeId, Payload) ->
-    MatchHeadReg =
-    #push_registration{id = {UserBare, '_'},
-                       node = NodeId, _='_'},
-    SelectedReg =
-    mnesia:select(push_registration,
-                  [{MatchHeadReg, [], ['$_']}]),
+do_dispatch({local_reg, _, Secret}, UserBare, NodeId, Payload) ->
+    SelectedReg = mnesia:read({push_registration, NodeId}),
     case SelectedReg of
         [] ->
             ?INFO_MSG("push event for local user ~p, but user is not registered"
-                      " at local app server", []);
-        
-        [#push_registration{id = RegId,
+                      " at local app server", [UserBare]);
+       
+        [#push_registration{node = Node,
+                            bare_jid = StoredUserBare,
                             token = Token,
+                            secret = StoredSecret,
                             app_id = AppId,
                             backend_id = BackendId,
                             timestamp = Timestamp}] ->
-            ?DEBUG("++++ do_dispatch: found registration, dispatch locally", []),
-            do_dispatch_local(Payload, Token, AppId, BackendId, RegId,
-                              Timestamp, true)
+            case {UserBare, Secret} of
+                {StoredUserBare, StoredSecret} ->
+                    
+                    ?DEBUG("+++++ do_dispatch: found registration, dispatch locally",
+                           []),
+                    do_dispatch_local(Payload, Token, AppId, BackendId, Node,
+                                      Timestamp, true);
+
+                {StoredUserBare, _} -> 
+                    ?INFO_MSG("push event for local user ~p, but secret does "
+                              "not match", [UserBare]);
+
+                _ ->
+                    ?INFO_MSG("push event for local user ~p, but the "
+                              "user-provided node belongs to another user",
+                              [UserBare]) 
+            end
     end;
 
 do_dispatch({remote_reg, PubsubHost, Secret}, UserBare, NodeId, Payload) ->
@@ -779,15 +793,15 @@ do_dispatch({remote_reg, PubsubHost, Secret}, UserBare, NodeId, Payload) ->
     Token :: binary(),
     AppId :: binary(),
     BackendId :: integer(),
-    RegId :: {bare_jid(), device_id()},
+    Node :: binary(),
     Timestamp :: erlang:timestamp(),
     AllowRelay :: boolean())
     -> ok
 ).
 
-do_dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
+do_dispatch_local(Payload, Token, AppId, BackendId, Node, Timestamp,
                   AllowRelay) ->
-    DisableArgs = {RegId, Timestamp},
+    DisableArgs = {Node, Timestamp},
     [#push_backend{worker = Worker, cluster_nodes = ClusterNodes}] =
     mnesia:read({push_backend, BackendId}),
     case lists:member(node(), ClusterNodes) of
@@ -819,13 +833,13 @@ do_dispatch_local(Payload, Token, AppId, BackendId, RegId, Timestamp,
 (
     UserBare :: bare_jid(),
     PubsubJid :: jid(),
-    NodeId :: binary(),
+    Node :: binary(),
     Payload :: payload(),
     Secret :: binary())
     -> any()
 ).
 
-do_dispatch_remote({User, Server}, PubsubJid, NodeId, Payload, Secret) ->
+do_dispatch_remote({User, Server}, PubsubJid, Node, Payload, Secret) ->
     MakeKey = fun(Atom) -> atom_to_binary(Atom, utf8) end,
     Fields =
     lists:foldl(
@@ -861,7 +875,7 @@ do_dispatch_remote({User, Server}, PubsubJid, NodeId, Payload, Secret) ->
         children =
         [#xmlel{name = <<"pubsub">>, attrs = [{<<"xmlns">>, ?NS_PUBSUB}],
                 children =
-                [#xmlel{name = <<"publish">>, attrs = [{<<"node">>, NodeId}],
+                [#xmlel{name = <<"publish">>, attrs = [{<<"node">>, Node}],
                         children =
                         [#xmlel{name = <<"item">>,
                                 children = [Notification]}]}] ++ PubOpts}]},
@@ -1047,20 +1061,20 @@ on_resume_session(#jid{luser = LUser, lserver = LServer, lresource = LResource}
 -spec(incoming_notification/4 ::
 (
     _HookAcc :: any(),
-    NodeId :: binary(),
+    Node :: binary(),
     Payload :: xmlelement(),
     PubOpts :: xmlelement())
     -> any()
 ).
 
-incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
-                                                attrs = [{<<"xmlns">>, ?NS_PUSH}],
-                                                children = Children}|_],
+incoming_notification(_HookAcc, Node, [#xmlel{name = <<"notification">>,
+                                              attrs = [{<<"xmlns">>, ?NS_PUSH}],
+                                              children = Children}|_],
                       PubOpts) ->
-    ?DEBUG("+++++ in mod_push:incoming_notification, NodeId: ~p, PubOpts = ~p", [NodeId, PubOpts]),
+    ?DEBUG("+++++ in mod_push:incoming_notification, Node: ~p, PubOpts = ~p",
+           [Node, PubOpts]),
     ProcessReg =
-    fun(#push_registration{id = RegId,
-                           token = Token,
+    fun(#push_registration{token = Token,
                            secret = Secret,
                            app_id = AppId,
                            backend_id = BackendId,
@@ -1069,7 +1083,7 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
             true ->
                 case get_xdata_elements(Children) of
                    [] ->
-                       do_dispatch_local([], Token, AppId, BackendId, RegId,
+                       do_dispatch_local([], Token, AppId, BackendId, Node,
                                          Timestamp, false);
 
                     XDataForms ->
@@ -1105,14 +1119,14 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
                                      {'pending-subscription-count', SubscrCount},
                                      {'last-subscription-sender', SubscrSender}]),
                                 do_dispatch_local(Payload, Token, AppId,
-                                                  BackendId, RegId, Timestamp,
+                                                  BackendId, Node, Timestamp,
                                                   false);
                              Err ->
                                 ?DEBUG("+++++ parse_form returned ~p", [Err]),
                                 ?INFO_MSG("Cancel dispatching push "
                                           "notification: item published on node"
                                           " ~p contains malformed data form",
-                                          [NodeId]),
+                                          [Node]),
                                 bad_request
                         end
                 end;
@@ -1121,11 +1135,10 @@ incoming_notification(_HookAcc, NodeId, [#xmlel{name = <<"notification">>,
         end
     end,
     F = fun() ->
-        MatchHeadReg = #push_registration{node = NodeId, _ = '_'},
-        case mnesia:select(push_registration, [{MatchHeadReg, [], ['$_']}]) of
+        case mnesia:read({push_registration, Node}) of
             [] ->
                 ?INFO_MSG("received push notification for non-existing node ~p",
-                          [NodeId]),
+                          [Node]),
                 node_not_found;
 
             [Reg] ->
@@ -1180,12 +1193,8 @@ add_backends(Host) ->
                     PubsubHost = B#push_backend.pubsub_host,
                     ?INFO_MSG("added adhoc command handler for app server ~p",
                               [RegisterHost]),
-                    % FIXME: publish options not implemented yet:
-                    %ejabberd_hooks:add(pubsub_publish_item_with_opts, BackendHost, ?MODULE,
-                    %                   incoming_notification),
                     ejabberd_hooks:add(node_push_publish_item, PubsubHost, ?MODULE,
                                        incoming_notification, 50),
-                    %% FIXME: haven't thought about IQDisc parameter
                     NewBackend =
                     case mnesia:read({push_backend, B#push_backend.id}) of
                         [] -> B;
@@ -1290,7 +1299,6 @@ start_workers(Host, Module,
 -spec(notify_previous_users/1 :: (Host :: binary()) -> ok).
 
 notify_previous_users(Host) ->
-    % TODO: send push notifications to all users in table push_user, then delete them
     MatchHead = #push_user{bare_jid = {'_', Host}, _='_'},
     Users = mnesia:select(push_user, [{MatchHead, [], ['$_']}]),
     lists:foreach(
