@@ -31,6 +31,8 @@
 -behaviour(gen_mod).
 
 -export([start/2, stop/1,
+         mod_opt_type/1,
+         get_backend_opts/1,
          process_iq/3,
          on_store_stanza/3,
          incoming_notification/4,
@@ -1183,51 +1185,47 @@ add_backends(Host) ->
     gen_mod:get_module_opt(Host, ?MODULE, backends,
                            fun(O) when is_list(O) -> O end,
                            []),
-    case parse_backends(BackendOpts, Host, CertFile, []) of
-        invalid -> error;
-        [] -> ok;
-        Parsed ->
-            lists:foreach(
-                fun({B, _}) ->
-                    RegisterHost =B#push_backend.register_host,
-                    PubsubHost = B#push_backend.pubsub_host,
-                    ?INFO_MSG("added adhoc command handler for app server ~p",
-                              [RegisterHost]),
-                    ejabberd_hooks:add(node_push_publish_item, PubsubHost, ?MODULE,
-                                       incoming_notification, 50),
-                    NewBackend =
-                    case mnesia:read({push_backend, B#push_backend.id}) of
-                        [] -> B;
-                        [#push_backend{cluster_nodes = Nodes}] ->
-                            NewNodes =
-                            lists:merge(Nodes, B#push_backend.cluster_nodes),
-                            B#push_backend{cluster_nodes = NewNodes}
-                    end,
-                    mnesia:write(NewBackend)
-                end,
-                Parsed),
-            %% remove all tuples {push_backend, auth_data} with duplicate auth_data as
-            %% we only need to start one worker for each type / auth_data combination
-            RemoveDupAuthData =
-            fun F([]) -> [];
-                F([{CurB, CurA} | T]) ->
-                [{CurB, CurA} | [{B, A} || {B, A} <- F(T), A =/= CurA]]
+    Backends = parse_backends(BackendOpts, Host, CertFile),
+    lists:foreach(
+        fun({B, _}) ->
+            RegisterHost =B#push_backend.register_host,
+            PubsubHost = B#push_backend.pubsub_host,
+            ?INFO_MSG("added adhoc command handler for app server ~p",
+                      [RegisterHost]),
+            ejabberd_hooks:add(node_push_publish_item, PubsubHost, ?MODULE,
+                               incoming_notification, 50),
+            NewBackend =
+            case mnesia:read({push_backend, B#push_backend.id}) of
+                [] -> B;
+                [#push_backend{cluster_nodes = Nodes}] ->
+                    NewNodes =
+                    lists:merge(Nodes, B#push_backend.cluster_nodes),
+                    B#push_backend{cluster_nodes = NewNodes}
             end,
-            lists:foreach(
-                fun({Type, Module}) ->
-                    MatchingType =
-                    [{B, A} || {B, A} <- Parsed, B#push_backend.type =:= Type],
-                    start_workers(Host, Module, RemoveDupAuthData(MatchingType))
-                end,
-                [{apns, ?MODULE_APNS},
-                 {gcm, ?MODULE_GCM},
-                 {mozilla, ?MODULE_MOZILLA},
-                 {ubuntu, ?MODULE_UBUNTU},
-                 {wns, ?MODULE_WNS}])
-            % TODO:
-            % subscribe to mnesia event {table, push_backend, detailed}, so workers can
-            % be restarted when backend is updated
-    end.
+            mnesia:write(NewBackend)
+        end,
+        Backends),
+    %% remove all tuples {push_backend, auth_data} with duplicate auth_data as
+    %% we only need to start one worker for each type / auth_data combination
+    RemoveDupAuthData =
+    fun F([]) -> [];
+        F([{CurB, CurA} | T]) ->
+        [{CurB, CurA} | [{B, A} || {B, A} <- F(T), A =/= CurA]]
+    end,
+    lists:foreach(
+        fun({Type, Module}) ->
+            MatchingType =
+            [{B, A} || {B, A} <- Backends, B#push_backend.type =:= Type],
+            start_workers(Host, Module, RemoveDupAuthData(MatchingType))
+        end,
+        [{apns, ?MODULE_APNS},
+         {gcm, ?MODULE_GCM},
+         {mozilla, ?MODULE_MOZILLA},
+         {ubuntu, ?MODULE_UBUNTU},
+         {wns, ?MODULE_WNS}]).
+    % TODO:
+    % subscribe to mnesia event {table, push_backend, detailed}, so workers can
+    % be restarted when backend is updated
 
 %-------------------------------------------------------------------------
 
@@ -1880,6 +1878,20 @@ stop(Host) ->
     mnesia:transaction(F).
 
 %-------------------------------------------------------------------------
+
+mod_opt_type(iqdisc) -> fun gen_iq_handler:check_type/1;
+mod_opt_type(include_senders) -> fun(B) when is_boolean(B) -> B end;
+mod_opt_type(include_message_count) -> fun(B) when is_boolean(B) -> B end;
+mod_opt_type(include_subscription_count) -> fun(B) when is_boolean(B) -> B end;
+mod_opt_type(include_message_bodies) -> fun(B) when is_boolean(B) -> B end;
+mod_opt_type(access_backends) -> fun(A) when is_atom(A) -> A end;
+mod_opt_type(certfile) -> fun(B) when is_binary(B) -> B end;
+mod_opt_type(backends) -> fun ?MODULE:get_backend_opts/1;
+mod_opt_type(_) ->
+    [iqdisc, include_senders, include_message_count, include_subscription_count,
+     include_message_bodies, access_backends, certfile, backends].
+
+%-------------------------------------------------------------------------
 % mod_push utility functions
 %-------------------------------------------------------------------------
 
@@ -1976,75 +1988,76 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
                     
 %-------------------------------------------------------------------------
 
--spec(parse_backends/4 ::
+-spec(parse_backends/3 ::
 (
-    [any()],
+    BackendOpts :: [any()],
     Host :: binary(),
-    CertFile :: binary(),
-    Acc :: [{push_backend(), auth_data()}])
+    DefaultCertFile :: binary())
     -> invalid | [{push_backend(), auth_data()}]
 ).
 
-parse_backends([], _Host, _CertFile, Acc) ->
-    Acc;
+parse_backends(RawBackendOptsList, Host, DefaultCertFile) ->
+    BackendOptsList = get_backend_opts(RawBackendOptsList),
+    MakeBackend =
+    fun({RegHostJid, PubsubHostJid, Type, AppName, CertFile, AuthKey,
+         PackageSid}, Acc) ->
+        ChosenCertFile = case is_binary(CertFile) of
+            true -> CertFile;
+            false -> DefaultCertFile
+        end,
+        case is_binary(ChosenCertFile) and (ChosenCertFile =/= <<"">>) of
+            true ->
+                BackendId =
+                erlang:phash2({RegHostJid#jid.lserver, Type}),
+                AuthData =
+                #auth_data{auth_key = AuthKey,
+                           package_sid = PackageSid,
+                           certfile = ChosenCertFile},
+                Worker =
+                gen_mod:get_module_proc(
+                    Host,
+                    combine_to_atom(?MODULE, Type, AuthData)),
+                Backend =
+                #push_backend{
+                   id = BackendId,
+                   register_host = RegHostJid#jid.lserver,
+                   pubsub_host = PubsubHostJid#jid.lserver,
+                   type = Type,
+                   app_name = AppName,
+                   cluster_nodes = [node()],
+                   worker = Worker},
+                [{Backend, AuthData}|Acc];
 
-parse_backends([BackendOpts|T], Host, CertFile, Acc) ->
-    Type = proplists:get_value(type, BackendOpts),
-    RegisterHostB = proplists:get_value(register_host, BackendOpts),
-    PubsubHostB = proplists:get_value(pubsub_host, BackendOpts),
-    RegisterHostJid = jlib:string_to_jid(RegisterHostB),
-    PubsubHostJid = jlib:string_to_jid(PubsubHostB),
-    case {RegisterHostJid, PubsubHostJid} of
-        {#jid{luser = <<"">>, lserver = RegisterHost, lresource = <<"">>},
-         #jid{luser = <<"">>, lserver = PubsubHost, lresource = <<"">>}} ->
-            case Type of
-               ValidType when ValidType =:= apns;
-                              ValidType =:= gcm;
-                              ValidType =:= mozilla;
-                              ValidType =:= ubuntu;
-                              ValidType =:= wns ->
-                    BackendId =
-                    erlang:phash2({RegisterHost, Type}),
-                    AuthData =
-                    #auth_data{
-                        auth_key = proplists:get_value(auth_key, BackendOpts),
-                        package_sid = proplists:get_value(package_sid, BackendOpts),
-                        certfile =
-                        proplists:get_value(certfile, BackendOpts, CertFile)},
-                    Worker =
-                    gen_mod:get_module_proc(
-                        Host,
-                        combine_to_atom(?MODULE, Type, AuthData)), 
-                    AppName =
-                    proplists:get_value(app_name, BackendOpts),
-                    Backend =
-                    #push_backend{
-                        id = BackendId,
-                        register_host = RegisterHost,
-                        pubsub_host = PubsubHost,
-                        type = Type,
-                        app_name = AppName,
-                        cluster_nodes = [node()],
-                        worker = Worker
-                    },
-                    parse_backends(T, Host, CertFile, [{Backend, AuthData}|Acc]);
+            false ->
+                ?ERROR_MSG("option certfile not defined for mod_push backend",
+                           []),
+                Acc
+        end
+    end,
+    lists:foldl(MakeBackend, [], BackendOptsList).
 
-                _ ->
-                    ?INFO_MSG("unknown push backend type for pubsub host ~p",
-                              [PubsubHost]),
-                    invalid
-            end;
+%-------------------------------------------------------------------------
 
-        {error, _} ->
-            ?INFO_MSG("push backend has invalid register host ~p",
-                      [RegisterHostB]),
-            invalid;
-
-        {_, error} ->
-            ?INFO_MSG("push backend has invalid pubsub host ~p",
-                      [PubsubHostB]),
-            invalid
-    end.
+get_backend_opts(RawOptsList) ->
+    lists:map(
+        fun(Opts) ->
+            RegHostJid =
+            jlib:string_to_jid(proplists:get_value(register_host, Opts)),
+            PubsubHostJid =
+            jlib:string_to_jid(proplists:get_value(pubsub_host, Opts)),
+            RawType = proplists:get_value(type, Opts),
+            Type =
+            case lists:member(RawType, [apns, gcm, mozilla, ubuntu, wns]) of
+                true -> RawType
+            end,
+            AppName = proplists:get_value(app_name, Opts, <<"any">>),
+            CertFile = proplists:get_value(certfile, Opts),
+            AuthKey = proplists:get_value(auth_key, Opts),
+            PackageSid = proplists:get_value(package_sid, Opts),
+            {RegHostJid, PubsubHostJid, Type, AppName, CertFile, AuthKey,
+             PackageSid}
+        end,
+        RawOptsList).
 
 %-------------------------------------------------------------------------
 
@@ -2415,4 +2428,3 @@ combine_to_atom(Atom1, Atom2, Term) ->
 ljid_to_jid({LUser, LServer, LResource}) ->
     #jid{user = LUser, server = LServer, resource = LResource,
          luser = LUser, lserver = LServer, lresource = LResource}.
-
