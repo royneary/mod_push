@@ -256,7 +256,7 @@ register_client(#jid{luser = LUser,
     end,
     case mnesia:transaction(F) of
         {aborted, _} -> {error, ?ERR_INTERNAL_SERVER_ERROR};
-        {atomic, error} -> error;
+        {atomic, error} -> {error, ?ERR_ITEM_NOT_FOUND};
         {atomic, Result} -> {registered, Result}
     end. 
 
