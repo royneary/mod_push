@@ -47,7 +47,7 @@
          on_remove_user/2,
          process_adhoc_command/4,
          resend_packets/1,
-         unregister_client/2,
+         unregister_client/1,
          check_secret/2]).
 
 -include("logger.hrl").
@@ -264,15 +264,14 @@ register_client(#jid{luser = LUser,
 
 %% Callback for workers
 
--spec(unregister_client/2 ::
+-spec(unregister_client/1 ::
 (
-    Node :: binary(),
-    Timestamp :: erlang:timestamp())
+    Args :: {binary(), erlang:timestamp()})
     -> error | {error, xmlelement()} | {unregistered, ok} |
        {unregistered, [binary()]}
 ).
 
-unregister_client(Node, Timestamp) ->
+unregister_client({Node, Timestamp}) ->
     unregister_client(undefined, undefined, Timestamp, [Node]). 
 
 %-------------------------------------------------------------------------
@@ -768,8 +767,8 @@ do_dispatch({local_reg, _, Secret}, UserBare, NodeId, Payload) ->
                     
                     ?DEBUG("+++++ do_dispatch: found registration, dispatch locally",
                            []),
-                    do_dispatch_local(Payload, Token, AppId, BackendId, Node,
-                                      Timestamp, true);
+                    do_dispatch_local(UserBare, Payload, Token, AppId,
+                                      BackendId, Node, Timestamp, true);
 
                 {StoredUserBare, _} -> 
                     ?INFO_MSG("push event for local user ~p, but secret does "
@@ -789,8 +788,9 @@ do_dispatch({remote_reg, PubsubHost, Secret}, UserBare, NodeId, Payload) ->
 
 %-------------------------------------------------------------------------
 
--spec(do_dispatch_local/7 ::
+-spec(do_dispatch_local/8 ::
 (
+    UserBare :: bare_jid(),
     Payload :: payload(),
     Token :: binary(),
     AppId :: binary(),
@@ -801,7 +801,7 @@ do_dispatch({remote_reg, PubsubHost, Secret}, UserBare, NodeId, Payload) ->
     -> ok
 ).
 
-do_dispatch_local(Payload, Token, AppId, BackendId, Node, Timestamp,
+do_dispatch_local(UserBare, Payload, Token, AppId, BackendId, Node, Timestamp,
                   AllowRelay) ->
     DisableArgs = {Node, Timestamp},
     [#push_backend{worker = Worker, cluster_nodes = ClusterNodes}] =
@@ -810,7 +810,8 @@ do_dispatch_local(Payload, Token, AppId, BackendId, Node, Timestamp,
         true ->
             ?DEBUG("+++++ dispatch_local: calling worker", []),
             gen_server:cast(Worker,
-                            {dispatch, Payload, Token, AppId, DisableArgs});
+                            {dispatch, UserBare, Payload, Token, AppId,
+                             DisableArgs});
 
         false ->
             case AllowRelay of
@@ -825,7 +826,7 @@ do_dispatch_local(Payload, Token, AppId, BackendId, Node, Timestamp,
                     gen_server:cast(
                         {Worker, ChosenNode},
                         {dispatch,
-                         Payload, Token, AppId, DisableArgs})
+                         UserBare, Payload, Token, AppId, DisableArgs})
             end
     end.
            
@@ -1076,7 +1077,8 @@ incoming_notification(_HookAcc, Node, [#xmlel{name = <<"notification">>,
     ?DEBUG("+++++ in mod_push:incoming_notification, Node: ~p, PubOpts = ~p",
            [Node, PubOpts]),
     ProcessReg =
-    fun(#push_registration{token = Token,
+    fun(#push_registration{bare_jid = BareJid,
+                           token = Token,
                            secret = Secret,
                            app_id = AppId,
                            backend_id = BackendId,
@@ -1085,8 +1087,8 @@ incoming_notification(_HookAcc, Node, [#xmlel{name = <<"notification">>,
             true ->
                 case get_xdata_elements(Children) of
                    [] ->
-                       do_dispatch_local([], Token, AppId, BackendId, Node,
-                                         Timestamp, false);
+                       do_dispatch_local(BareJid, [], Token, AppId, BackendId,
+                                         Node, Timestamp, false);
 
                     XDataForms ->
                         ParseResult =
@@ -1120,9 +1122,9 @@ incoming_notification(_HookAcc, Node, [#xmlel{name = <<"notification">>,
                                      {'last-message-body', MsgBody},
                                      {'pending-subscription-count', SubscrCount},
                                      {'last-subscription-sender', SubscrSender}]),
-                                do_dispatch_local(Payload, Token, AppId,
-                                                  BackendId, Node, Timestamp,
-                                                  false);
+                                do_dispatch_local(BareJid, Payload, Token,
+                                                  AppId, BackendId, Node,
+                                                  Timestamp, false);
                              Err ->
                                 ?DEBUG("+++++ parse_form returned ~p", [Err]),
                                 ?INFO_MSG("Cancel dispatching push "
@@ -1185,44 +1187,47 @@ add_backends(Host) ->
     gen_mod:get_module_opt(Host, ?MODULE, backends,
                            fun(O) when is_list(O) -> O end,
                            []),
-    Backends = parse_backends(BackendOpts, Host, CertFile),
+    Backends = parse_backends(BackendOpts, CertFile),
     lists:foreach(
-        fun({B, _}) ->
-            RegisterHost =B#push_backend.register_host,
-            PubsubHost = B#push_backend.pubsub_host,
+        fun({Backend, AuthData}) ->
+            RegisterHost =Backend#push_backend.register_host,
+            PubsubHost = Backend#push_backend.pubsub_host,
             ?INFO_MSG("added adhoc command handler for app server ~p",
                       [RegisterHost]),
             ejabberd_hooks:add(node_push_publish_item, PubsubHost, ?MODULE,
                                incoming_notification, 50),
             NewBackend =
-            case mnesia:read({push_backend, B#push_backend.id}) of
-                [] -> B;
+            case mnesia:read({push_backend, Backend#push_backend.id}) of
+                [] -> Backend;
                 [#push_backend{cluster_nodes = Nodes}] ->
                     NewNodes =
-                    lists:merge(Nodes, B#push_backend.cluster_nodes),
-                    B#push_backend{cluster_nodes = NewNodes}
+                    lists:merge(Nodes, Backend#push_backend.cluster_nodes),
+                    Backend#push_backend{cluster_nodes = NewNodes}
             end,
-            mnesia:write(NewBackend)
+            mnesia:write(NewBackend),
+            start_worker(Backend, AuthData)
         end,
-        Backends),
-    %% remove all tuples {push_backend, auth_data} with duplicate auth_data as
-    %% we only need to start one worker for each type / auth_data combination
-    RemoveDupAuthData =
-    fun F([]) -> [];
-        F([{CurB, CurA} | T]) ->
-        [{CurB, CurA} | [{B, A} || {B, A} <- F(T), A =/= CurA]]
-    end,
-    lists:foreach(
-        fun({Type, Module}) ->
-            MatchingType =
-            [{B, A} || {B, A} <- Backends, B#push_backend.type =:= Type],
-            start_workers(Host, Module, RemoveDupAuthData(MatchingType))
-        end,
-        [{apns, ?MODULE_APNS},
-         {gcm, ?MODULE_GCM},
-         {mozilla, ?MODULE_MOZILLA},
-         {ubuntu, ?MODULE_UBUNTU},
-         {wns, ?MODULE_WNS}]).
+        Backends).
+    
+
+    %%% remove all tuples {push_backend, auth_data} with duplicate auth_data as
+    %%% we only need to start one worker for each type / auth_data combination
+    %RemoveDupAuthData =
+    %fun F([]) -> [];
+    %    F([{CurB, CurA} | T]) ->
+    %    [{CurB, CurA} | [{B, A} || {B, A} <- F(T), A =/= CurA]]
+    %end,
+    %lists:foreach(
+    %    fun({Type, Module}) ->
+    %        MatchingType =
+    %        [{B, A} || {B, A} <- Backends, B#push_backend.type =:= Type],
+    %        start_workers(Host, Module, RemoveDupAuthData(MatchingType))
+    %    end,
+    %    [{apns, ?MODULE_APNS},
+    %     {gcm, ?MODULE_GCM},
+    %     {mozilla, ?MODULE_MOZILLA},
+    %     {ubuntu, ?MODULE_UBUNTU},
+    %     {wns, ?MODULE_WNS}]).
     % TODO:
     % subscribe to mnesia event {table, push_backend, detailed}, so workers can
     % be restarted when backend is updated
@@ -1267,30 +1272,58 @@ add_disco_hooks(ServerHost) ->
 
 %-------------------------------------------------------------------------
 
--spec(start_workers/3 ::
+-spec(start_worker/2 ::
 (
-    Host :: binary(),
-    Module :: atom(),
-    [{push_backend(), auth_data()}])
+    Backend :: push_backend(),
+    AuthData :: auth_data())
     -> ok
 ).
 
-% TODO: remove recursion
-start_workers(_Host, _Module, []) -> ok;
-
-start_workers(Host, Module,
-              [{Backend,
-               #auth_data{auth_key = AuthKey,
-                          package_sid = PackageSid,
-                          certfile = CertFile}}|T]) ->
-    Worker = Backend#push_backend.worker,
+start_worker(#push_backend{worker = Worker, type = Type},
+             #auth_data{auth_key = AuthKey,
+                        package_sid = PackageSid,
+                        certfile = CertFile}) ->
+    Module =
+    proplists:get_value(Type,
+                        [{apns, ?MODULE_APNS},
+                         {gcm, ?MODULE_GCM},
+                         {mozilla, ?MODULE_MOZILLA},
+                         {ubuntu, ?MODULE_UBUNTU},
+                         {wns, ?MODULE_WNS}]),
     BackendSpec =
     {Worker,
      {gen_server, start_link,
-      [{local, Worker}, Module, [Host, AuthKey, PackageSid, CertFile], []]},
+      [{local, Worker}, Module,
+       [AuthKey, PackageSid, CertFile], []]},
      permanent, 1000, worker, [?MODULE]},
-    supervisor:start_child(ejabberd_sup, BackendSpec),
-    start_workers(Host, Module, T).
+    supervisor:start_child(ejabberd_sup, BackendSpec).
+
+
+%-spec(start_workers/3 ::
+%(
+%    Host :: binary(),
+%    Module :: atom(),
+%    [{push_backend(), auth_data()}])
+%    -> ok
+%).
+%
+%% TODO: remove recursion
+%start_workers(_Host, _Module, []) -> ok;
+%
+%start_workers(Host, Module,
+%              [{Backend,
+%               #auth_data{auth_key = AuthKey,
+%                          package_sid = PackageSid,
+%                          certfile = CertFile}}|T]) ->
+%    Worker = Backend#push_backend.worker,
+%    BackendSpec =
+%    {Worker,
+%     {gen_server, start_link,
+%      [{local, Worker}, Module,
+%       [Worker, AuthKey, PackageSid, CertFile], []]},
+%     permanent, 1000, worker, [?MODULE]},
+%    supervisor:start_child(ejabberd_sup, BackendSpec),
+%    start_workers(Host, Module, T).
 
 %-------------------------------------------------------------------------
 
@@ -1868,7 +1901,9 @@ stop(Host) ->
                                     Backend#push_backend{cluster_nodes = Remote})
                         end,
                         supervisor:terminate_child(ejabberd_sup,
-                                                   Backend#push_backend.worker)
+                                                   Backend#push_backend.worker),
+                        supervisor:delete_child(ejabberd_sup,
+                                                Backend#push_backend.worker)
                 end
             end,
             ok,
@@ -1988,15 +2023,14 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
                     
 %-------------------------------------------------------------------------
 
--spec(parse_backends/3 ::
+-spec(parse_backends/2 ::
 (
     BackendOpts :: [any()],
-    Host :: binary(),
     DefaultCertFile :: binary())
     -> invalid | [{push_backend(), auth_data()}]
 ).
 
-parse_backends(RawBackendOptsList, Host, DefaultCertFile) ->
+parse_backends(RawBackendOptsList, DefaultCertFile) ->
     BackendOptsList = get_backend_opts(RawBackendOptsList),
     MakeBackend =
     fun({RegHostJid, PubsubHostJid, Type, AppName, CertFile, AuthKey,
@@ -2013,10 +2047,7 @@ parse_backends(RawBackendOptsList, Host, DefaultCertFile) ->
                 #auth_data{auth_key = AuthKey,
                            package_sid = PackageSid,
                            certfile = ChosenCertFile},
-                Worker =
-                gen_mod:get_module_proc(
-                    Host,
-                    combine_to_atom(?MODULE, Type, AuthData)),
+                Worker = make_worker_name(RegHostJid#jid.lserver, Type),
                 Backend =
                 #push_backend{
                    id = BackendId,
@@ -2364,6 +2395,18 @@ make_config_form(Opts) ->
 
 %-------------------------------------------------------------------------
 
+-spec(make_worker_name/2 ::
+(
+    RegisterHost :: binary(),
+    Type :: atom())
+    -> atom()
+).
+
+make_worker_name(RegisterHost, Type) ->
+    gen_mod:get_module_proc(RegisterHost, Type).
+
+%-------------------------------------------------------------------------
+
 -spec(boolean_to_binary/1 :: (Bool :: boolean()) -> binary()).
 
 boolean_to_binary(Bool) ->
@@ -2399,23 +2442,6 @@ binary_to_boolean(Binary, DefaultResult, InvalidResult) ->
         undefined -> DefaultResult;
         _ -> InvalidResult
     end.
-
-%-------------------------------------------------------------------------
-
--spec(combine_to_atom/3 ::
-(
-    Atom1 :: atom(),
-    Atom2 :: atom(),
-    Term :: any())
-    -> atom()
-).
-
-combine_to_atom(Atom1, Atom2, Term) ->
-    TermHash = erlang:phash2(Term),
-    List =
-    atom_to_list(Atom1) ++ "_" ++ atom_to_list(Atom2) ++ "_" ++
-    integer_to_list(TermHash),
-    list_to_atom(List).
 
 %-------------------------------------------------------------------------
 

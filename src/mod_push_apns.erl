@@ -57,7 +57,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, _PackageSid, CertFile]) ->
+init([_AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_apns:init", []),
     %inets:start(),
     crypto:start(),
@@ -89,7 +89,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %% TODO: store {MessageId, DisableCb} tuples and handle invalid-token
 %% error messages
-handle_cast({dispatch, Payload, Token, _AppId, DisableArgs},
+handle_cast({dispatch, _UserBare, Payload, Token, _AppId, DisableArgs},
             #state{certfile = CertFile, out_socket = OutSocket} = State) ->
     ?DEBUG("+++++ Sending push notification to ~p", [?PUSH_URL]),
     Socket = case OutSocket of

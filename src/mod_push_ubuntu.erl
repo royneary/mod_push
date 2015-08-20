@@ -55,7 +55,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, _PackageSid, CertFile]) ->
+init([_AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_ubuntu:init", []),
     inets:start(),
     ssl:start(),
@@ -71,7 +71,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, AppId, DisableArgs},
+handle_cast({dispatch, _UserBare, Payload, Token, AppId, DisableArgs},
             #state{certfile = CertFile,
                    too_many_pending = TooManyPending} = State) ->
     % TODO: right now the clear_pending field is set if server replied with a

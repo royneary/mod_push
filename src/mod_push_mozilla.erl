@@ -55,7 +55,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, _AuthKey, _PackageSid, CertFile]) ->
+init([_AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_mozilla:init", []),
     inets:start(),
     ssl:start(),
@@ -71,7 +71,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, Token, _AppId, DisableArgs},
+handle_cast({dispatch, _UserBare, Payload, Token, _AppId, DisableArgs},
             #state{certfile = CertFile,
                    version = Version} = State) ->
     Url = ?PUSH_URL ++ binary_to_list(Token),

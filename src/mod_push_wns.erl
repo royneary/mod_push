@@ -58,7 +58,7 @@
 
 %-------------------------------------------------------------------------
 
-init([_Host, ClientSecret, PackageSid, CertFile]) ->
+init([ClientSecret, PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_wns:init", []),
     inets:start(),
     ssl:start(),
@@ -81,7 +81,7 @@ handle_call(_Req, _From, State) -> {noreply, State}.
 
 %-------------------------------------------------------------------------
 
-handle_cast({dispatch, Payload, ChannelUrl, _AppId, DisableArgs},
+handle_cast({dispatch, _UserBare, Payload, ChannelUrl, _AppId, DisableArgs},
             #state{certfile = CertFile, access_token = AccessToken} = State) ->
     case is_list(AccessToken) of
         false ->
