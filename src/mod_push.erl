@@ -1982,10 +1982,11 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
     OptionalFields =
     lists:map(
         fun(Opt) -> {{single, atom_to_binary(Opt, utf8)},
-                     fun(B) -> {Opt, binary_to_boolean(B, undefined)} end}
+                     fun(B) -> binary_to_boolean(B, error) end}
         end,
         AllowedOpts),
     ParseResult = parse_form(XDataForms, ?NS_PUSH_OPTIONS, [], OptionalFields),
+    ?DEBUG("+++++ ParseResult = ~p", [ParseResult]),
     case ParseResult of
         error -> error;
         
@@ -2017,7 +2018,7 @@ make_config(XDataForms, OldConfig, ConfigPrivilege) ->
                             end
                         end,
                         {[], []},
-                        ParsedOptions)
+                        lists:zip(AllowedOpts, ParsedOptions))
             end
     end.
                     
