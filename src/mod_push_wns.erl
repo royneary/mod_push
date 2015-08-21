@@ -90,9 +90,13 @@ handle_cast({dispatch, _UserBare, Payload, ChannelUrl, _AppId, DisableArgs},
         true ->
             ?DEBUG("+++++ Sending push notification to ~p", [ChannelUrl]),
             SslOpts =
-            [{certfile, CertFile}, {versions, ['tlsv1.2']},
-             {ciphers, ?CIPHERSUITES}, {server_name_indication, disable},
-             {reuse_sessions, true}],
+            [{certfile, CertFile},
+             {versions, ['tlsv1.2']},
+             {ciphers, ?CIPHERSUITES},
+             {reuse_sessions, true},
+             {secure_renegotiate, true}],
+             %{verify, verify_peer},
+             %{cacertfile, CACertFile}],
             HttpOpts =
             [{timeout, ?HTTP_TIMEOUT}, {connect_timeout, ?HTTP_CONNECT_TIMEOUT},
              {ssl, SslOpts}],

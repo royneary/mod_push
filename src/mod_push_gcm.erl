@@ -43,6 +43,7 @@
 -define(HTTP_TIMEOUT, 10000).
 -define(HTTP_CONNECT_TIMEOUT, 10000).
 -define(RETRY_INTERVAL, 30000).
+-define(MAX_PAYLOAD_SIZE, 4096).
 -define(CIPHERSUITES,
         [{K,C,H} || {K,C,H} <- ssl:cipher_suites(erlang),
                     K =/= ecdh_ecdsa, K =/= ecdh_rsa, K =/= rsa,
@@ -139,15 +140,24 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %-------------------------------------------------------------------------
 
 send_request(Payload, Token, CertFile, ApiKey) ->
+    P = case payload_size_ok(Payload) of
+        true -> Payload;
+        false -> []
+    end,
     PushMessage =
     {struct,
-    [{to, Token}, {time_to_live, ?EXPIRY_TIME}, {data, Payload}]},
+    [{to, Token}, {time_to_live, ?EXPIRY_TIME}, {data, {struct, P}}]},
     ?DEBUG("+++++++ PushMessage (before encoding): ~p", [PushMessage]),
     Body = iolist_to_binary(mochijson2:encode(PushMessage)),
     ?DEBUG("+++++++ encoded json: ~s", [Body]),
     SslOpts =
-    [{certfile, CertFile}, {versions, ['tlsv1.2']}, {ciphers, ?CIPHERSUITES},
-     {server_name_indication, disable}, {reuse_sessions, true}],
+    [{certfile, CertFile},
+     {versions, ['tlsv1.2']},
+     {ciphers, ?CIPHERSUITES},
+     {reuse_sessions, true},
+     {secure_renegotiate, true}],
+     %{verify, verify_peer},
+     %{cacertfile, CACertFile}],
     HttpOpts =
     [{timeout, ?HTTP_TIMEOUT}, {connect_timeout, ?HTTP_CONNECT_TIMEOUT},
      {ssl, SslOpts}],
@@ -216,14 +226,20 @@ process_success_response(ResponseBody) ->
                             end;
     
                         _ ->
-                            ?WARNING_MSG(
+                            ?ERROR_MSG(
                                 "Invalid GCM response, treating as "
                                 "non-recoverable error", []),
                             error
                     end
             end;
     
-        _ -> ?WARNING_MSG("Invalid GCM response, treating as "
-                          "non-recoverable error", []),
+        _ -> ?ERROR_MSG("Invalid GCM response, treating as "
+                        "non-recoverable error", []),
              error
     end.
+
+%-------------------------------------------------------------------------
+
+payload_size_ok(Payload) ->
+    EncodedPayload = mochijson2:encode({struct, Payload}),
+    iolist_size(EncodedPayload) =< ?MAX_PAYLOAD_SIZE.
