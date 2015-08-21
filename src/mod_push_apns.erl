@@ -65,6 +65,7 @@
          pending_timer :: reference(),
          retry_timer :: reference(),
          pending_timestamp :: erlang:timestamp(),
+         retry_timestamp :: erlang:timestamp(),
          message_id :: pos_integer()}).
 
 %-------------------------------------------------------------------------
@@ -98,30 +99,32 @@ handle_info({ssl, _Socket, Data},
         {RCommand, RStatus, RId}
     of
         {8, Status, Id} ->
-            case lists:keytake(Id, 1, PendingList) of
-                false -> State;
-                {value,
-                 {_, {UserB, _, Token, DisableArgs} = Element}, NewPending} ->
+            DropProcessed =
+            lists:dropwhile(fun({Key, _}) -> Key =/= Id end, PendingList),
+            case DropProcessed of
+                [] -> State;
+
+                [{_, {UserB, _, Token, DisableArgs} = Element}|NewPending] ->
                     case Status of
                         10 ->
                             ?INFO_MSG("recoverable APNS error, retrying...", []),
-                            erlang:cancel_timer(RetryTimer),
-                            NewRetryTimer =
-                            erlang:send_after(?RETRY_INTERVAL, self(), retry),
+                            {NewRetryTimer, Timestamp} =
+                            restart_retry_timer(RetryTimer),
                             State#state{pending_list = NewPending,
                                         retry_list = [Element|RetryList],
-                                        retry_timer = NewRetryTimer};
+                                        retry_timer = NewRetryTimer,
+                                        retry_timestamp = Timestamp};
 
                         7 ->
                             ?INFO_MSG("recoverable APNS error, retrying...", []),
-                            erlang:cancel_timer(RetryTimer),
-                            NewRetryTimer =
-                            erlang:send_after(?RETRY_INTERVAL, self(), retry),
+                            {NewRetryTimer, Timestamp} =
+                            restart_retry_timer(RetryTimer),
                             State#state{
                                 pending_list = NewPending,
                                 retry_list =
                                 [{UserB, [], Token, DisableArgs}|RetryList],
-                                retry_timer = NewRetryTimer};
+                                retry_timer = NewRetryTimer,
+                                retry_timestamp = Timestamp};
 
                         S ->
                             ?INFO_MSG("non-recoverable APNS error: ~p", [S]),
@@ -134,7 +137,7 @@ handle_info({ssl, _Socket, Data},
             ?ERROR_MSG("invalid APNS response", []),
             State
     catch {'EXIT', _} ->
-        ?ERROR_MSG("invalud APNS response", []),
+        ?ERROR_MSG("invalid APNS response", []),
         State
     end,
     self() ! send,
@@ -145,15 +148,24 @@ handle_info({ssl_closed, _SslSocket}, State) ->
     {noreply, State#state{out_socket = undefined}};
 
 %% retry_timeout
-handle_info(retry, #state{send_list = SendList,
-                          retry_list = RetryList,
-                          pending_timer = PendingTimer} = State) ->
-    NewSendList = SendList ++ RetryList,
-    case erlang:read_timer(PendingTimer) of
-        false -> self() ! send;
-        _ -> ok
+handle_info({retry, Timestamp},
+            #state{send_list = SendList,
+                   retry_list = RetryList,
+                   pending_timer = PendingTimer,
+                   retry_timestamp = StoredTimestamp} = State) ->
+    NewState =
+    case Timestamp of
+        StoredTimestamp ->
+            NewSendList = SendList ++ RetryList,
+            case erlang:read_timer(PendingTimer) of
+                false -> self() ! send;
+                _ -> State
+            end,
+            State#state{send_list = NewSendList, retry_list = []};
+
+        _ -> State
     end,
-    {noreply, State#state{send_list = NewSendList, retry_list = []}};
+    {noreply, NewState};
 
 %% pending_timeout
 handle_info({pending_timeout, Timestamp},
@@ -181,13 +193,12 @@ handle_info(send, #state{certfile = CertFile,
             ?ERROR_MSG("connection to APNS failed: ~p", [Reason]),
             NewRetryList =        
             pending_to_retry(PendingList, RetryList),
-            erlang:cancel_timer(RetryTimer),
-            NewRetryTimer =
-            erlang:send_after(?RETRY_INTERVAL, self(), retry),
+            {NewRetryTimer, Timestamp} = restart_retry_timer(RetryTimer),
             State#state{out_socket = error,
                         pending_list = [],
                         retry_list = NewRetryList,
-                        retry_timer = NewRetryTimer};
+                        retry_timer = NewRetryTimer,
+                        retry_timestamp = Timestamp};
 
         Socket ->
             PendingSpace = ?MAX_PENDING_NOTIFICATIONS - length(PendingList),
@@ -225,15 +236,15 @@ handle_info(send, #state{certfile = CertFile,
                                        [Reason]),
                             NewRetryList =
                             pending_to_retry(NewPendingList, RetryList),
-                            erlang:cancel_timer(RetryTimer),
-                            NewRetryTimer =
-                            erlang:send_after(?RETRY_INTERVAL, self(), retry),
+                            {NewRetryTimer, Timestamp} =
+                            restart_retry_timer(RetryTimer),
                             State#state{out_socket = error,
                                         pending_list = [],
                                         retry_list = NewRetryList,
                                         send_list = NewSendList,
                                         retry_timer = NewRetryTimer,
-                                        message_id = NewMessageId};
+                                        message_id = NewMessageId,
+                                        retry_timestamp = Timestamp};
 
                         ok ->
                             ?INFO_MSG("sending to APNS successful", []),
@@ -314,7 +325,7 @@ make_notifications(PendingList) ->
                %4:8, 4:16/big, ?MESSAGE_EXPIRY_TIME:4/big-unsigned-integer-unit:8,
                %5:8, 1:16/big, ?MESSAGE_PRIORITY:8>>,
             FrameLength = size(Frame),
-            <<<<2:1/unit:8, FrameLength:4/unit:8, Frame/binary>>/binary, Acc/binary>>
+            <<Acc/binary, <<2:1/unit:8, FrameLength:4/unit:8, Frame/binary>>/binary>>
         end,
         <<"">>,
         PendingList).
@@ -351,3 +362,9 @@ pending_to_retry(PendingList, RetryList) ->
         PendingList).
 
 %-------------------------------------------------------------------------
+
+restart_retry_timer(OldTimer) ->
+    erlang:cancel_timer(OldTimer),
+    Timestamp = erlang:now(),
+    NewTimer = erlang:send_after(?RETRY_INTERVAL, self(), {retry, Timestamp}),
+    {NewTimer, Timestamp}.
