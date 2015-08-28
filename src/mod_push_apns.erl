@@ -311,7 +311,7 @@ make_notifications(PendingList) ->
         fun({MessageId, {_, Payload, Token, _}}, Acc) ->
             PushMessage =
             {struct,
-             [{aps, {struct, [{'content-available', 1}|Payload]}}]},
+             [{aps, {struct, [{'content-available', 1}]}}|Payload]},
             EncodedMessage =
             iolist_to_binary(mochijson2:encode(PushMessage)),
             ?DEBUG("++++++ Encoded message: ~p", [EncodedMessage]),
