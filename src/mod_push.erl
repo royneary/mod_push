@@ -701,25 +701,15 @@ dispatch(Stanzas, UserJid, SetPending) ->
                     ?DEBUG("+++++ dispatch: found subscription", []),
                     WriteUser =
                     fun(Payload) ->
-                        NewPayload = case Payload of
-                            none -> OldPayload;
-                            _ -> Payload
-                        end,
                         NewUser =
                         PushUser#push_user{subscriptions = NewSubscrs,
-                                           payload = NewPayload},
+                                           payload = Payload},
                         mnesia:write(NewUser)
                     end,
                     case make_payload(Stanzas, OldPayload, Config) of
-                        none ->
-                            ?DEBUG("+++++ dispatch: no payload", []),
-                            case SetPending of
-                                true -> WriteUser(none);
-                                false -> ok
-                            end;
+                        none -> WriteUser(OldPayload);
 
-                        {payload, Payload, StanzasToStore} ->
-                            ?DEBUG("+++++ dispatch: payload ~p", [Payload]),
+                        {Payload, StanzasToStore} ->
                             Receiver = jlib:jid_tolower(UserJid),
                             lists:foreach(
                                 fun({Timestamp, Stanza}) ->
@@ -731,8 +721,7 @@ dispatch(Stanzas, UserJid, SetPending) ->
                                 end,
                                 StanzasToStore),
                             WriteUser(Payload),
-                            do_dispatch(RegType, {LUser, LServer}, NodeId,
-                                        Payload)
+                            do_dispatch(RegType, {LUser, LServer}, NodeId, Payload)
                     end
             end
     end.
@@ -1209,29 +1198,6 @@ add_backends(Host) ->
         end,
         Backends).
     
-
-    %%% remove all tuples {push_backend, auth_data} with duplicate auth_data as
-    %%% we only need to start one worker for each type / auth_data combination
-    %RemoveDupAuthData =
-    %fun F([]) -> [];
-    %    F([{CurB, CurA} | T]) ->
-    %    [{CurB, CurA} | [{B, A} || {B, A} <- F(T), A =/= CurA]]
-    %end,
-    %lists:foreach(
-    %    fun({Type, Module}) ->
-    %        MatchingType =
-    %        [{B, A} || {B, A} <- Backends, B#push_backend.type =:= Type],
-    %        start_workers(Host, Module, RemoveDupAuthData(MatchingType))
-    %    end,
-    %    [{apns, ?MODULE_APNS},
-    %     {gcm, ?MODULE_GCM},
-    %     {mozilla, ?MODULE_MOZILLA},
-    %     {ubuntu, ?MODULE_UBUNTU},
-    %     {wns, ?MODULE_WNS}]).
-    % TODO:
-    % subscribe to mnesia event {table, push_backend, detailed}, so workers can
-    % be restarted when backend is updated
-
 %-------------------------------------------------------------------------
 
 -spec(add_disco_hooks/1 ::
@@ -1297,33 +1263,6 @@ start_worker(#push_backend{worker = Worker, type = Type},
        [AuthKey, PackageSid, CertFile], []]},
      permanent, 1000, worker, [?MODULE]},
     supervisor:start_child(ejabberd_sup, BackendSpec).
-
-
-%-spec(start_workers/3 ::
-%(
-%    Host :: binary(),
-%    Module :: atom(),
-%    [{push_backend(), auth_data()}])
-%    -> ok
-%).
-%
-%% TODO: remove recursion
-%start_workers(_Host, _Module, []) -> ok;
-%
-%start_workers(Host, Module,
-%              [{Backend,
-%               #auth_data{auth_key = AuthKey,
-%                          package_sid = PackageSid,
-%                          certfile = CertFile}}|T]) ->
-%    Worker = Backend#push_backend.worker,
-%    BackendSpec =
-%    {Worker,
-%     {gen_server, start_link,
-%      [{local, Worker}, Module,
-%       [Worker, AuthKey, PackageSid, CertFile], []]},
-%     permanent, 1000, worker, [?MODULE]},
-%    supervisor:start_child(ejabberd_sup, BackendSpec),
-%    start_workers(Host, Module, T).
 
 %-------------------------------------------------------------------------
 
@@ -2096,73 +2035,83 @@ get_backend_opts(RawOptsList) ->
 -spec(make_payload/3 ::
 (
     UnackedStanzas :: [{erlang:timestamp(), xmlelement()}],
-    OldPayload :: payload(),
+    StoredPayload :: payload(),
     Config :: user_config())
-    -> none | {payload, payload(), [{erlang:timestamp(), xmlelement()}]}
+    -> none | {payload(), [{erlang:timestamp(), xmlelement()}]}
 ).
 
+make_payload([], _StoredPayload, _Config) -> none;
+
 make_payload(UnackedStanzas, StoredPayload, Config) ->
-    StanzaToPayload =
-    fun({_Timestamp, Stanza}, OldPayload) ->
-	    FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
+    UpdatePayload =
+    fun(NewValues, OldPayload) ->
+        lists:foldl(
+            fun
+                ({_Key, undefined}, Acc) -> Acc;
+                ({Key, Value}, Acc) -> lists:keystore(Key, 1, Acc, {Key, Value})
+            end,
+            OldPayload,
+            NewValues)
+    end,
+    MakeNewValues =
+    fun(Stanza, OldPayload) ->
+        FromS = proplists:get_value(<<"from">>, Stanza#xmlel.attrs),
         case Stanza of
             #xmlel{name = <<"message">>, children = Children} ->
-                %% FIXME: Do we want to send push notifications on every message type?
-                %% FIXME: what about multiple body elements for different languages?
-                %% FIXME: max length of body's cdata?
                 BodyPred =
                 fun (#xmlel{name = <<"body">>}) -> true;
                     (_) -> false
                 end,
-                MsgBody = case lists:filter(BodyPred, Children) of
-                    [] -> <<"">>;
+                NewBody = case lists:filter(BodyPred, Children) of
+                    [] -> undefined;
                     [#xmlel{children = [{xmlcdata, CData}]}|_] -> CData
                 end,
-                OldMsgCount = proplists:get_value('message-count', OldPayload, 0),
-                MsgCount = case OldMsgCount of
-                    ?MAX_INT -> 0; 
+                NewMsgCount = 
+                case proplists:get_value('message-count', OldPayload, 0) of
+                    ?MAX_INT -> 0;
                     C when is_integer(C) -> C + 1
                 end,
-                [{'message-count', MsgCount},
-                 {'last-message-sender', FromS},
-                 {'last-message-body', MsgBody}];
-             
-           #xmlel{name = <<"presence">>, attrs = Attrs} -> 
+                {push_and_store,
+                 [{'last-message-body', NewBody},
+                  {'last-message-sender', FromS},
+                  {'message-count', NewMsgCount}]};
+
+            #xmlel{name = <<"presence">>, attrs = Attrs} ->
                 case proplists:get_value(<<"type">>, Attrs) of
                     <<"subscribe">> ->
                         OldSubscrCount =
-                        proplists:get_value('pending-subscription-count',
-                                            OldPayload, 0),
-                        SubscrCount =
+                        proplists:get_value('pending-subscriptions', OldPayload, 0),
+                        NewSubscrCount =
                         case OldSubscrCount of
                             ?MAX_INT -> 0;
                             C when is_integer(C) -> C + 1
                         end,
-                        [{'pending-subscription-count', SubscrCount},
-                         {'last-subscription-sender', FromS}];
-                   
-                    _ -> none
+                        {push,
+                         [{'pending-subscription-count', NewSubscrCount},
+                          {'last-subscription-sender', FromS}]};
+
+                    _ ->
+                        {push, []}
                 end;
 
-            _ -> none
+            _ -> {push, []}
         end
     end,
-    
-    Result =
+    {NewPayload, StanzasToStore} =
     lists:foldl(
-        fun(Stanza, {PayloadAcc, StanzasAcc}) ->
-            case StanzaToPayload(Stanza, PayloadAcc) of
-                none -> {PayloadAcc, StanzasAcc};
-                P -> {P, [Stanza|StanzasAcc]}
+        fun({Timestamp, Stanza}, {PayloadAcc, StanzasAcc}) ->
+            case MakeNewValues(Stanza, PayloadAcc) of
+                {push, NewValues} -> 
+                    {UpdatePayload(NewValues, PayloadAcc), StanzasAcc};
+
+                {push_and_store, NewValues} ->
+                    {UpdatePayload(NewValues, PayloadAcc),
+                     [{Timestamp, Stanza}|StanzasAcc]}
             end
-        end,
+        end,                                              
         {StoredPayload, []},
         UnackedStanzas),
-    case Result of
-        {_, []} -> none;
-        {Payload, StanzasToStore} ->
-            {payload, filter_payload(Payload, Config), StanzasToStore}
-    end.
+    {filter_payload(NewPayload, Config), StanzasToStore}.
 
 %-------------------------------------------------------------------------
 
