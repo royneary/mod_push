@@ -36,7 +36,7 @@
          process_iq/3,
          on_store_stanza/3,
          incoming_notification/4,
-         on_affiliation_removal/4,
+         on_affiliation_removal/5,
          on_unset_presence/4,
          on_resume_session/1,
          on_wait_for_resume/3,
@@ -938,17 +938,18 @@ on_remove_user(User, Server) ->
 
 %-------------------------------------------------------------------------
 
--spec(on_affiliation_removal/4 ::
+-spec(on_affiliation_removal/5 ::
 (
+    Packet :: xmlelement(),
+    State :: term(),
     _User :: jid(),
     From :: jid(),
-    To :: jid(),
-    Packet :: xmlelement())
-    -> ok
+    To :: jid())
+    -> xmlelement()
 ).
 
-on_affiliation_removal(User, From, _To,
-                       #xmlel{name = <<"message">>, children = Children}) ->
+on_affiliation_removal(#xmlel{name = <<"message">>, children = Children} = Stanza,
+                       _C2SState, User, From, _To) ->
     FindNodeAffiliations =
     fun 
     F([#xmlel{name = <<"pubsub">>, attrs = Attrs, children = PChildr}|T]) ->
@@ -996,9 +997,10 @@ on_affiliation_removal(User, From, _To,
                 BareUserJid -> disable(BareUserJid, From, Node, true);
                 _ -> ErrMsg()
             end
-    end;
+    end,
+    Stanza;
 
-on_affiliation_removal(_Jid, _From, _To, _) -> ok.
+on_affiliation_removal(Stanza, _C2SState, _Jid, _From, _To) -> Stanza.
         
 %-------------------------------------------------------------------------
 
