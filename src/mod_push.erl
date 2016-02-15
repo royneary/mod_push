@@ -2191,8 +2191,17 @@ get_xdata_elements(Elements) ->
 
 get_xdata_elements([#xmlel{name = <<"x">>, attrs = Attrs} = H | T], Acc) ->
     case proplists:get_value(<<"xmlns">>, Attrs) of
-        ?NS_XDATA -> get_xdata_elements(T, [H|Acc]);
-        _ -> get_xdata_elements(T, Acc)
+        ?NS_XDATA ->
+            NewAttrs =
+            case fxml:get_attr(<<"type">>, Attrs) of
+                {value, _Type} ->
+                    Attrs;
+                false ->
+                    [{<<"type">>, <<"submit">>}|Attrs]
+            end,
+            get_xdata_elements(T, [H#xmlel{attrs = NewAttrs}|Acc]);
+        _ ->
+            get_xdata_elements(T, Acc)
     end;
 
 get_xdata_elements([_ | T], Acc) ->
