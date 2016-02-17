@@ -1102,9 +1102,14 @@ incoming_notification(_HookAcc, Node, [#xmlel{name = <<"notification">>,
                                 lists:foldl(
                                     fun({Key, Value}, Acc) ->
                                         case Value of
-                                            undefined -> Acc;
-                                            #jid{} -> jlib:jid_to_string(Value);
-                                            _ -> [{Key, Value}|Acc]
+                                            undefined ->
+                                                Acc;
+                                            #jid{} ->
+                                                JidStr =
+                                                jlib:jid_to_string(Value),
+                                                [{Key, JidStr}|Acc];
+                                            _ ->
+                                                [{Key, Value}|Acc]
                                         end
                                     end,
                                     [],
