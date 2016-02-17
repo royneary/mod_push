@@ -136,11 +136,11 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload, PubOpts) ->
         true ->
             VirtualNode = nodetree_virtual:get_node(Nidx),
             [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
-            NodeId = VirtualNode#pubsub_node.nodeid,
+            {_Host, Node} = VirtualNode#pubsub_node.nodeid,
             Result =
             ejabberd_hooks:run_fold(node_push_publish_item, Host,
                                     internal_server_error,
-                                    [NodeId, Payload, PubOpts]),
+                                    [Node, Payload, PubOpts]),
             ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
             case Result of
                 ok -> {result, default};
