@@ -30,11 +30,11 @@
 -behaviour(gen_server).
 
 -export([init/1,
-         handle_info/2,
-         handle_call/3,
-         handle_cast/2,
-         terminate/2,
-         code_change/3]).
+	 handle_info/2,
+	 handle_call/3,
+	 handle_cast/2,
+	 terminate/2,
+	 code_change/3]).
 
 -include("logger.hrl").
 
@@ -43,17 +43,17 @@
 -define(HTTP_TIMEOUT, 10000).
 -define(HTTP_CONNECT_TIMEOUT, 10000).
 -define(CIPHERSUITES,
-        [{K,C,H} || {K,C,H} <- ssl:cipher_suites(erlang),
-                    K =/= ecdh_ecdsa, K =/= ecdh_rsa, K =/= rsa,
-                    C =/= rc4_128, C =/= des_cbc, C =/= '3des_ede_cbc',
-                    H =/= sha, H =/= md5]).
+	[{K,C,H} || {K,C,H} <- ssl:cipher_suites(erlang),
+		    K =/= ecdh_ecdsa, K =/= ecdh_rsa, K =/= rsa,
+		    C =/= rc4_128, C =/= des_cbc, C =/= '3des_ede_cbc',
+		    H =/= sha, H =/= md5]).
 
-% TODO: add message_queue
+%% TODO: add message_queue
 -record(state,
-        {certfile :: binary(),
-         too_many_pending = false :: boolean()}).
+	{certfile :: binary(),
+	 too_many_pending = false :: boolean()}).
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 init([_AuthKey, _PackageSid, CertFile]) ->
     ?DEBUG("+++++++++ mod_push_ubuntu:init", []),
@@ -61,62 +61,62 @@ init([_AuthKey, _PackageSid, CertFile]) ->
     ssl:start(),
     {ok, #state{certfile = CertFile}}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 handle_info(_Info, State) -> {noreply, State}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 handle_call(_Req, _From, State) -> {noreply, State}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 handle_cast({dispatch, _UserBare, Payload, Token, AppId, DisableArgs},
-            #state{certfile = CertFile,
-                   too_many_pending = TooManyPending} = State) ->
-    % TODO: right now the clear_pending field is set if server replied with a
-    % too-many-pending error or if the include_senders option is set false. 
-    % There's an optional 'tag' field which we can use to tell the proprietary
-    % server to clear pending notifications triggered by the same sender in order to
-    % save bandwidth from proprietary server to client. So store a random tag per
-    % sender and set replace_tag: "sender_tag" in each push notification
+	    #state{certfile = CertFile,
+		   too_many_pending = TooManyPending} = State) ->
+    %% TODO: right now the clear_pending field is set if server replied with a
+    %% too-many-pending error or if the include_senders option is set false.
+    %% There's an optional 'tag' field which we can use to tell the proprietary
+    %% server to clear pending notifications triggered by the same sender in order to
+    %% save bandwidth from proprietary server to client. So store a random tag per
+    %% sender and set replace_tag: "sender_tag" in each push notification
     ?DEBUG("+++++ Sending push notification to ~p", [?PUSH_URL]),
     ClearPending =
-    TooManyPending, %or (FromL =:= undefined),
+	TooManyPending, %or (FromL =:= undefined),
     PushMessage =
-    {struct,
-     [{appid, AppId}, {expire_on, expiry_time()}, {token, Token},
-      {clear_pending, ClearPending},
-      {data, Payload}]},
+	{struct,
+	 [{appid, AppId}, {expire_on, expiry_time()}, {token, Token},
+	  {clear_pending, ClearPending},
+	  {data, Payload}]},
     ?DEBUG("+++++++ PushMessage (before encoding): ~p", [PushMessage]),
     Body = iolist_to_binary(mochijson2:encode(PushMessage)),
     ?DEBUG("+++++++ encoded json: ~s", [Body]),
     SslOpts =
-    [{certfile, CertFile},
-     {versions, ['tlsv1.2']},
-     {ciphers, ?CIPHERSUITES},
-     {reuse_sessions, true},
-     {secure_renegotiate, true}],
-     %{verify, verify_peer},
-     %{cacertfile, CACertFile}],
+	[{certfile, CertFile},
+	 {versions, ['tlsv1.2']},
+	 {ciphers, ?CIPHERSUITES},
+	 {reuse_sessions, true},
+	 {secure_renegotiate, true}],
+	 %{verify, verify_peer},
+	 %{cacertfile, CACertFile}],
     HttpOpts =
-    [{timeout, ?HTTP_TIMEOUT}, {connect_timeout, ?HTTP_CONNECT_TIMEOUT},
-     {ssl, SslOpts}],
+	[{timeout, ?HTTP_TIMEOUT}, {connect_timeout, ?HTTP_CONNECT_TIMEOUT},
+	 {ssl, SslOpts}],
     Opts =
-    [],
+	[],
     Request = {?PUSH_URL, [], "application/json", Body},
     Reply =
-    try httpc:request(post, Request, HttpOpts, Opts) of
-        {ok, {{_,200,_},_,RespBody}} ->
-                    {ok, mochijson2:decode(RespBody)};
-        {error, Reason } ->
-                    {error, Reason};
-        {ok, {{StatusLine,_,_},_,RespBody}} ->
-                    {error, {StatusLine, RespBody}};
-        BigError -> {error, BigError}
-    catch
-        Throw -> {error, caught, Throw}
-    end,
+	try httpc:request(post, Request, HttpOpts, Opts) of
+	    {ok, {{_,200,_},_,RespBody}} ->
+		{ok, mochijson2:decode(RespBody)};
+	    {error, Reason } ->
+		{error, Reason};
+	    {ok, {{StatusLine,_,_},_,RespBody}} ->
+		{error, {StatusLine, RespBody}};
+	    BigError -> {error, BigError}
+	catch
+	    Throw -> {error, caught, Throw}
+	end,
     ?DEBUG("++++++++ Server replied: ~p", [Reply]),
 
     %DisableCb(),
@@ -125,15 +125,15 @@ handle_cast({dispatch, _UserBare, Payload, Token, AppId, DisableArgs},
 
 handle_cast(_Req, State) -> {reply, {error, badarg}, State}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 terminate(_Reason, State) -> {noreply, State}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-%-------------------------------------------------------------------------
+%%------------------------------------------------------------------------
 
 expiry_time() ->
     Now = now(),
@@ -141,5 +141,4 @@ expiry_time() ->
     Time = setelement(2, Now, Seconds + ?EXPIRY_TIME),
     jlib:now_to_utc_string(Time).
 
-%-------------------------------------------------------------------------
-
+%%------------------------------------------------------------------------

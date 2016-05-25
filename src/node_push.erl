@@ -2,7 +2,7 @@
 %%% File    : node_push.erl
 %%% Author  : Christian Ulrich <christian@rechenwerk.net>
 %%% Purpose : mod_push's pubsub plugin
-%%%           
+%%%
 %%% Created : 24 Mar 2015 by Christian Ulrich <christian@rechenwerk.net>
 %%%
 %%%
@@ -63,8 +63,8 @@
 	 get_item/2,
 	 set_item/1,
 	 get_item_name/3,
-     node_to_path/1,
-     path_to_node/1
+	 node_to_path/1,
+	 path_to_node/1
 	]).
 
 
@@ -115,13 +115,13 @@ create_node_permission(Host, ServerHost, Node, ParentNode, Owner, Access) ->
 
 create_node(Nidx, Owner) ->
     node_hometree:create_node(Nidx, Owner).
-        
+
 delete_node(Removed) ->
     node_hometree:delete_node(Removed).
 
 subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast, PresenceSubscription, RosterGroup, Options) ->
     node_flat:subscribe_node(Nidx, Sender, Subscriber, AccessModel, SendLast,
-                             PresenceSubscription, RosterGroup, Options).
+			     PresenceSubscription, RosterGroup, Options).
 
 unsubscribe_node(Nidx, Sender, Subscriber, SubID) ->
     node_hometree:unsubscribe_node(Nidx, Sender, Subscriber, SubID).
@@ -133,42 +133,42 @@ publish_item(Nidx, Publisher, Model, MaxItems, ItemId, Payload, PubOpts) ->
     %% XEP-0060 notification stanzas
     ?DEBUG("++++++ node_push:publish_item, node = ~p", [Nidx]),
     case is_binary(Nidx) of
-        true ->
-            VirtualNode = nodetree_virtual:get_node(Nidx),
-            [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
-            {_Host, Node} = VirtualNode#pubsub_node.nodeid,
-            Result =
-            ejabberd_hooks:run_fold(node_push_publish_item, Host,
-                                    internal_server_error,
-                                    [Node, Payload, PubOpts]),
-            ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
-            case Result of
-                ok -> {result, default};
-                bad_request -> {error, ?ERR_BAD_REQUEST};
-                node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
-                not_authorized -> {error, ?ERR_FORBIDDEN};
-                internal_server_error -> {error, ?ERR_INTERNAL_SERVER_ERROR}
-            end;
+	true ->
+	    VirtualNode = nodetree_virtual:get_node(Nidx),
+	    [{<<"">>, Host, <<"">>}] = VirtualNode#pubsub_node.owners,
+	    {_Host, Node} = VirtualNode#pubsub_node.nodeid,
+	    Result =
+		ejabberd_hooks:run_fold(node_push_publish_item, Host,
+					internal_server_error,
+					[Node, Payload, PubOpts]),
+	    ?DEBUG("+++++ node_push_publish_item hook result: ~p", [Result]),
+	    case Result of
+		ok -> {result, default};
+		bad_request -> {error, ?ERR_BAD_REQUEST};
+		node_not_found -> {error, ?ERR_ITEM_NOT_FOUND};
+		not_authorized -> {error, ?ERR_FORBIDDEN};
+		internal_server_error -> {error, ?ERR_INTERNAL_SERVER_ERROR}
+	    end;
 
-        false ->
-            #pubsub_node{options = Options} = nodetree_tree:get_node(Nidx),
-            ?DEBUG("+++++ Node options = ~p", [Options]),
-            Secret = proplists:get_value(secret, Options, <<"">>),
-            case mod_push:check_secret(Secret, PubOpts) of
-                true ->
-                    ?DEBUG("+++++ right secret!", []),
-                    Result =
-                    node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
-                                               ItemId, Payload, PubOpts),
-                    ?DEBUG("+++++ node_hometree:publish_item returned ~p",
-                           [Result]),
-                    Result;
-                false ->
-                    ?DEBUG("++++++ wrong secret, should be ~p", [Secret]),
-                    {error, ?ERR_FORBIDDEN}
-            end
+	false ->
+	    #pubsub_node{options = Options} = nodetree_tree:get_node(Nidx),
+	    ?DEBUG("+++++ Node options = ~p", [Options]),
+	    Secret = proplists:get_value(secret, Options, <<"">>),
+	    case mod_push:check_secret(Secret, PubOpts) of
+		true ->
+		    ?DEBUG("+++++ right secret!", []),
+		    Result =
+			node_hometree:publish_item(Nidx, Publisher, Model, MaxItems,
+						   ItemId, Payload, PubOpts),
+		    ?DEBUG("+++++ node_hometree:publish_item returned ~p",
+			   [Result]),
+		    Result;
+		false ->
+		    ?DEBUG("++++++ wrong secret, should be ~p", [Secret]),
+		    {error, ?ERR_FORBIDDEN}
+	    end
     end.
-    
+
 remove_extra_items(Nidx, MaxItems, ItemIds) ->
     node_hometree:remove_extra_items(Nidx, MaxItems, ItemIds).
 
@@ -219,15 +219,15 @@ get_items(Nidx, From, RSM) ->
 
 get_items(Nidx, JID, AccessModel, PresenceSubscription, RosterGroup, SubId, RSM) ->
     node_hometree:get_items(Nidx, JID, AccessModel,
-	PresenceSubscription, RosterGroup, SubId, RSM).
+			    PresenceSubscription, RosterGroup, SubId, RSM).
 
 get_item(Nidx, ItemId) ->
     node_hometree:get_item(Nidx, ItemId).
 
 get_item(Nidx, ItemId, JID, AccessModel, PresenceSubscription, RosterGroup, SubId) ->
     node_hometree:get_item(Nidx, ItemId, JID, AccessModel, PresenceSubscription,
-                           RosterGroup, SubId).
-    
+			   RosterGroup, SubId).
+
 set_item(Item) ->
     node_hometree:set_item(Item).
 
