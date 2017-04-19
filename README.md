@@ -14,7 +14,7 @@ mod_push is a project in the Google Summer of Code 2015 and is still pre-alpha. 
 * Erlang/OTP 17 or higher
 * If app server backends are used a working starttls configuration is required; by default the certificate set by the 'certfile' option will be used for communication with the push providers
 * for using APNS [this OTP fix](https://github.com/processone/otp/commit/45aaefe739c8ea6c33d140d056b94fcf53c3df30) is needed (see [this blog post](https://blog.process-one.net/apple-increasing-security-of-push-service-ahead-of-wwdc))
-* for now an [ejabberd branch](https://github.com/royneary/ejabberd/tree/mod_push_adjustments) with mod_push-specific modifications is needed
+* an [ejabberd branch](https://github.com/royneary/ejabberd/tree/mod_push_adjustments) with mod_push-specific modifications is needed
 
 ##Installation
 ```bash
