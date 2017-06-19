@@ -1,4 +1,4 @@
-#mod_push
+# mod_push
 mod_push implements [XEP-0357 (Push)](http://www.xmpp.org/extensions/xep-0357.html)
 for ejabberd and includes a messaging-focussed app server for the common push
 notification services. These are
@@ -10,13 +10,13 @@ notification services. These are
 
 mod_push is a project in the Google Summer of Code 2015 and is still pre-alpha. Please send feedback.
 
-##Prerequisites
+## Prerequisites
 * Erlang/OTP 17 or higher
 * If app server backends are used a working starttls configuration is required; by default the certificate set by the 'certfile' option will be used for communication with the push providers
 * for using APNS [this OTP fix](https://github.com/processone/otp/commit/45aaefe739c8ea6c33d140d056b94fcf53c3df30) is needed (see [this blog post](https://blog.process-one.net/apple-increasing-security-of-push-service-ahead-of-wwdc))
 * for now an [ejabberd branch](https://github.com/royneary/ejabberd/tree/mod_push_adjustments) with mod_push-specific modifications is needed
 
-##Installation
+## Installation
 ```bash
 git clone https://github.com/royneary/mod_push.git
 # copy the source code folder to the module sources folder of your ejabberd
@@ -28,20 +28,20 @@ ejabberdctl modules_available
 ejabberdctl module_install mod_push 
 ```
 
-##Important implementation details
+## Important implementation details
 mod_push depends on stream management (XEP-0198) stream resumption. A client will only receive push notifications when the server detects a dead TCP connection. After that the server will wait for the client to resume the stream. We call this state "pending" state (a.k.a. zombie state). To enter the pending state clients are expected to close their TCP connection without sending `</stream>`. They will typically do so in a handler the mobile OS will call before moving the application into background.
 
 Administrators sometimes have to restart XMPP servers. Ejabberd will close all open streams in that event which means that after a restart stream management will no longer notify mod_push about incoming stanzas for the previous push clients. As a solution to this problem mod_push will send a push notification to all previously pending push users after a restart so they can open a new connection. Currently this notification can not be distinguished from a "normal" notification (e.g. one sent in the event of an incoming message). This means a client will typically try to resume the stream which will fail as it does not exist anymore. Then it can start a new stream and re-enable push.
 Registrations at mod_push's app server will not be affected by server restarts so clients do not need to re-register. 
 
-##Configuration
-###stream management
+## Configuration
+### stream management
 The option `resume_timeout` for module ejabberd_c2s in the listen-section of
 ejabberd.yml must be set to a value greater than 0 (default value is 300). This enables
 stream resumption but the value has no effect on push users since mod_push
 overwrites this value to keep them pending for a long time.
 
-###pubsub configuration
+### pubsub configuration
 An XEP-0357 app server requires a pubsub service where XMPP servers can publish
 notifications. The pubsub service needs a dedicated hostname.
 If the internal app server shall be used, that is mod_push's option `backends` is not an empty list `[]`, mod_pubsub must be configured to fulfill the requirements of XEP-0357. The `push` plugin delivered by mod_push takes care of that. For the internal app server `nodetree: "virtual"` must be set. The `push` plugin can also be used to provide a pubsub service for external app server, such as [Oshiya](https://github.com/royneary/oshiya). In that case `nodetree = "tree"` must be set.
@@ -67,8 +67,8 @@ If you want to allow other XMPP servers to use your app server you need a SRV re
 _xmpp-server._tcp.push.example.net. 86400 IN SRV 5 0 5269 example.net.
 ```
 
-###XEP-0357 configuration
-####User-definable options
+### XEP-0357 configuration
+#### User-definable options
 There are user-definable config options to specify what contents should be in
 a push notification. You can set default values for them in the mod_push
 section:
@@ -128,35 +128,35 @@ mod_push provides in-band configuration although not recommended by XEP-0357. In
 The response to an enable request with configuration form will include
 those values that have been accepted for the new configuration.
 
-####restrict access
+#### restrict access
 The option `access_backends` allows restricting access to the app server backends using ejabberd's acl feature. `access_backends` may be defined in the mod_push section. The default value is `all`. The example configuration only allows local XMPP users to use the app server.
 
-###App server configuration
+### App server configuration
 You can set up multiple app server backends for the different push
 notification services. This is not required, your users can use external app
 servers too.
 
-####Default options
+#### Default options
 * `certfile`: the path to a certificate file (pem format, containing both certificate and private key) used as default for all backends
 
-####Common options
+#### Common options
 * `register_host`: the app server host where users can register. Must be a subdomain of the XMPP server hostname or the XMPP server hostname itself. The advantage of choosing the XMPP server hostname is that clients don't have to guess any subdomain (XEP-0357 does not define service discovery for finding app servers).
 * `pubsub_host`: the pubsub_host of the backend
 * `type`: apns|gcm|mozilla|ubuntu|wns
 * `app_name`: the name of the app the backend is configured for, will be send to the user when service discovery is done on the register_host; the default value is "any", but that's only a valid value for backend types that don't require developer credentials, that is ubuntu and mozilla
 * `certfile`: the path to a certificate file (pem format, containing both certificate and private key) the backend will use for TLS
 
-####APNS-specific options
+#### APNS-specific options
 * `certfile`: path to a pem file containing the developer's private key and the certificate obtained from Apple during the provisioning procedure
 
-####GCM-specific options
+#### GCM-specific options
 * `auth_key`: the API key obtained from Google's api console
 
-####WNS
+#### WNS
 * `auth_key`: the client secret obtained from Microsoft Developer Center
 * `package_sid`: the package SID obtained from Microsoft Developer Center
 
-###Example configuration
+### Example configuration
 ```yaml
 access:
   local_users:
@@ -196,7 +196,7 @@ modules:
         certfile: "/etc/ssl/private/apns_example_app.pem"  
 ```
 
-##App server usage
+## App server usage
 Clients can communicate with the app server by sending adhoc requests containing an XEP-0004 data form:
 These are the available adhoc commands:
 * `register-push-apns`: register at an APNS backend
@@ -225,25 +225,25 @@ Example:
 ```
 There are common fields which a client has to include for every backend type and there are backend-specific fields.
 
-###Common fields for the register commands
+### Common fields for the register commands
 * `token`: the device identifier the client obtained from the push service
 * `device-id`: a device identifier a client can define explicitly (the jid's resource part will be used otherwise)
 * `device-name`: an optional name that will be included in the response to the list-push-registrations command
 
-###register-push-apns fields
+### register-push-apns fields
 * `token`: the base64-encoded binary token obtained from APNS
 
-###register-push-ubuntu fields
+### register-push-ubuntu fields
 * `application-id`: the app id as registered at Ubuntu's push service
 
-###register-push-wns fields
+### register-push-wns fields
 * `token`: the channel URI which must be escaped according to RFC 2396, you can use .NET's Uri.EscapeUriString method for that
 
-###unregister-push fields
+### unregister-push fields
 * `device-id`: Either device ID or a list of node IDs must be given. If none of these are in the payload, the resource of the from jid will be interpreted as device ID. If both device ID and node list are given, the device ID will be ignored and only registrations matching a node ID in the given list will be removed.
 * `nodes`: a list of node names; registrations mathing one of them will be removed
 
-###register command response
+### register command response
 The app server returns the jid of the pubsub host a pubsub node name and a secret. The client can pass those to its XMPP server in the XEP-0357 enable request.
 Example:
 ```xml
@@ -264,7 +264,7 @@ Example:
 </iq>
 ```
 
-###unregister command response
+### unregister command response
 When a list of nodes was given in the request, the response contains the list of nodes of the deleted registrations.
 Example:
 ```xml
@@ -279,7 +279,7 @@ Example:
 </iq>
 ```
 
-###list registrations
+### list registrations
 A list of a user's push-enabled clients can be obtained using the `list-push-registrations` command. This might be important if a push client shall be unregistered without having access to the device anymore. If a client provided a `device-name` value during registration it is included in the response along with the node name.
 ```xml
 <iq from='example.net' to='bill@example.net/home' id='exec1' type='result'>
