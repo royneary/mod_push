@@ -1,4 +1,7 @@
 # mod_push
+
+Note: This project is not maintained anymore. Mainline ejabberd now [ships](https://github.com/processone/ejabberd/pull/1881) the app server part of XEP-0357.
+
 mod_push implements [XEP-0357 (Push)](http://www.xmpp.org/extensions/xep-0357.html)
 for ejabberd and includes a messaging-focussed app server for the common push
 notification services. These are
