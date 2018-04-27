@@ -38,7 +38,7 @@
 
 -include("logger.hrl").
 
--define(PUSH_URL, "https://push.ubuntu.com/notify").
+-define(PUSH_URL, "https://push.ubports.com/notify").
 -define(EXPIRY_TIME, 60*60*24).
 -define(HTTP_TIMEOUT, 10000).
 -define(HTTP_CONNECT_TIMEOUT, 10000).
